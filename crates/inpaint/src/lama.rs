@@ -219,7 +219,7 @@ impl Lama {
     /// multiples of 8, at least 32. Returns `[1, 3, h, w]` in 0..1.
     pub fn generate(&self, x: &Tensor) -> Result<Tensor> {
         let (_, _, h, w) = x.dims4()?;
-        if h % 8 != 0 || w % 8 != 0 || h < 32 || w < 32 {
+        if !h.is_multiple_of(8) || !w.is_multiple_of(8) || h < 32 || w < 32 {
             return Err(Error::Input(format!("{w}×{h}: sides must be multiples of 8, at least 32")));
         }
         let mut guard = self.dft.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

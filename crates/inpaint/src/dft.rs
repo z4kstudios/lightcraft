@@ -40,7 +40,7 @@ impl Dft {
         let tau = std::f64::consts::TAU;
         let ang_w = |x: usize, k: usize| tau * ((x * k) % w) as f64 / w as f64;
         let ang_h = |y: usize, k: usize| tau * ((y * k) % h) as f64 / h as f64;
-        let ck = |k: usize| if k == 0 || (w % 2 == 0 && k == w / 2) { 1.0 } else { 2.0 };
+        let ck = |k: usize| if k == 0 || (w.is_multiple_of(2) && k == w / 2) { 1.0 } else { 2.0 };
         Ok(Self {
             h,
             w,
