@@ -2493,9 +2493,19 @@ mod tests {
         h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [id.0]}}), t);
         h.request("ui.set", json!({"view": "detail", "right": "info"}), t);
         let before = h.app.session.catalog.photo(id).unwrap().captured.clone().unwrap();
+        // The dock header leaves less vertical space; bring the metadata action into view.
+        let panel = h.app.widgets.iter().find(|(id, _)| id == "panel:right_panel").unwrap().1;
+        let clipped_action = h.app.widgets.iter().find(|(id, _)| id == "icon:editCaptureTime").unwrap().1;
+        assert!(!panel.contains_rect(clipped_action), "the capture-time action starts below the visible panel: {clipped_action:?}");
+        h.request("ui.move", json!({"x": panel.center().x, "y": panel.center().y}), t);
+        h.request("ui.scroll", json!({"dy": -160.0}), t);
+        h.settle(SETTLE);
+        let action = h.app.widgets.iter().find(|(id, _)| id == "icon:editCaptureTime").unwrap().1;
+        assert!(panel.contains_rect(action), "capture-time action must be visible before clicking: {action:?} in {panel:?}");
         let r = h.request("ui.clickWidget", json!({"id": "icon:editCaptureTime"}), t);
         assert_eq!(r["ok"], true, "{r}");
-        h.request("ui.clickWidget", json!({"id": "button:captureMode-2"}), t);
+        let r = h.request("ui.clickWidget", json!({"id": "button:captureMode-2"}), t);
+        assert_eq!(r["ok"], true, "{r}");
         if let Some(crate::state::Dialog::CaptureTime { zone, .. }) = &mut h.app.ui.dialog {
             *zone = -3.0;
         } else {

@@ -180,8 +180,7 @@ fn sidebar_section_header(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, 
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let frame = egui::Frame::NONE.fill(t.chrome).stroke(egui::Stroke::new(1.0, t.divider));
-    let width = app.ui.left_width;
-    let resized = super::resizable_side(ui, true, "left_panel", frame, width, crate::state::LEFT_WIDTH, 0.0, |ui| {
+    frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let (hr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
         ui.painter().text(pos2(hr.left() + 18.0, hr.center().y), Align2::LEFT_CENTER, crate::i18n::tr("My Photos"), t.semibold(15.0), t.text);
@@ -300,9 +299,6 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             }
         });
     });
-    if let Some(w) = resized {
-        app.ui.left_width = w;
-    }
 }
 
 /// How many library photos have no file (Local browse records are not checked; see
@@ -775,7 +771,7 @@ fn albums_tree(app: &mut LightcraftApp, ui: &mut egui::Ui, all: &AlbumKids, pare
 /// Whether the pointer is over `rect` and over what the panel shows of it (a row scrolled out of
 /// sight is not a drop target).
 fn pointer_over(ui: &egui::Ui, rect: Rect) -> bool {
-    ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p))
+    crate::docking::drop_target(ui, rect, ui.input(|i| i.pointer.latest_pos()))
 }
 
 /// How close to the top or bottom edge of the sidebar (points) a dragged album starts scrolling it.
@@ -1010,7 +1006,7 @@ pub fn album_drag_feedback(app: &mut LightcraftApp, ctx: &egui::Context) {
 /// release there adds them.
 fn drop_target(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response, a: &Album) {
     let Some(ids) = app.ui.dragging_photos.clone() else { return };
-    let over = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| resp.rect.contains(p));
+    let over = pointer_over(ui, resp.rect);
     if !over {
         return;
     }

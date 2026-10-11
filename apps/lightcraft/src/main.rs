@@ -183,6 +183,23 @@ fn load_prefs(in_memory: bool) -> (Option<UiState>, Option<String>, bool) {
     load_prefs_at(&path, !in_memory)
 }
 
+/// Compatibility recovery is limited to persisted docking, not runtime UiState commands.
+fn decode_saved_ui(bytes: &[u8]) -> Result<(UiState, bool), String> {
+    let mut saved: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let fields = saved.as_object_mut().ok_or("settings must be an object")?;
+    let recovered =
+        fields.get("docking").is_some_and(|value| match serde_json::from_value::<Option<lightcraft_ui_egui::docking::Workspace>>(value.clone()) {
+            Ok(Some(workspace)) => workspace.validate().is_err(),
+            Ok(None) => false,
+            Err(_) => true,
+        });
+    if recovered {
+        fields.remove("docking");
+    }
+    let ui = serde_json::from_value(saved).map_err(|error| error.to_string())?;
+    Ok((ui, recovered))
+}
+
 fn load_prefs_at(path: &std::path::Path, set_aside_damaged: bool) -> (Option<UiState>, Option<String>, bool) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -192,8 +209,15 @@ fn load_prefs_at(path: &std::path::Path, set_aside_damaged: bool) -> (Option<UiS
             return (None, Some(msg), true);
         }
     };
-    match serde_json::from_slice::<UiState>(&bytes) {
-        Ok(ui) => (Some(ui.sanitized()), None, false),
+    match decode_saved_ui(&bytes) {
+        Ok((ui, false)) => (Some(ui.sanitized()), None, false),
+        Ok((ui, true)) => {
+            let msg = format!(
+                "The saved panel layout in {} couldn't be restored. Other settings were loaded; the original file is preserved and settings won't be saved this session.",
+                path.display()
+            );
+            (Some(ui.sanitized()), Some(msg), true)
+        }
         Err(e) if !set_aside_damaged => {
             let msg = format!("The app settings ({}) are damaged ({e}). Defaults are used; nothing is saved in this session.", path.display());
             (None, Some(msg), true)
@@ -270,6 +294,9 @@ impl PrefsWriter {
             return Ok(());
         }
         let Some(path) = self.path.clone() else { return Ok(()) };
+        if let Some(workspace) = &ui.docking {
+            workspace.validate()?;
+        }
         let bytes = serde_json::to_vec_pretty(ui).map_err(|e| e.to_string())?;
         if bytes == self.written {
             return Ok(());
@@ -608,6 +635,7 @@ OPTIONS:
   --version, --help
 
 ENVIRONMENT:
+  LIGHTCRAFT_CONFIG_DIR=DIR   use this settings folder instead of the platform default (empty = no settings folder)
   LIGHTCRAFT_GPU_BACKEND=dx12|vulkan|metal|auto|off   graphics backend (default: DX12 on Windows, Metal on macOS,
                    Vulkan on Linux; off = render on the CPU); else WGPU_BACKEND. LIGHTCRAFT_GPU=0: CPU rendering.
   LIGHTCRAFT_SAM3_DIR=DIR   the SAM 3 model for Object / Describe masks (default: <settings folder>/models/sam3;
@@ -663,10 +691,16 @@ fn control_port_from(what: &str, value: Option<String>) -> Option<u16> {
     port
 }
 
+/// An isolated profile keeps the emergency crash log with its other app data. With no
+/// override (or an empty override), retain the historical system-temp location.
+fn panic_log_path_with(env: impl Fn(&str) -> Option<std::ffi::OsString>, temp: std::path::PathBuf) -> std::path::PathBuf {
+    env("LIGHTCRAFT_CONFIG_DIR").filter(|value| !value.is_empty()).map(std::path::PathBuf::from).unwrap_or(temp).join("lightcraft-panics.log")
+}
+
 fn main() -> eframe::Result {
     // First, so every start-up record is kept for the log file (`logging`).
     let logger = logging::install();
-    lightcraft_engine::guard::install_hook(std::env::temp_dir().join("lightcraft-panics.log"));
+    lightcraft_engine::guard::install_hook(panic_log_path_with(|name| std::env::var_os(name), std::env::temp_dir()));
     if let Some(logger) = logger {
         logging::record_panics(logger);
     }
@@ -907,6 +941,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn docking_survives_native_settings_file_reload() {
+        use lightcraft_ui_egui::docking::Panel;
+        let d = dir("docking-reload");
+        let path = d.join("ui.json");
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services::default());
+        app.run("ui.dock", serde_json::json!({"operation":"float", "panel":"tools", "rect":[70,80,310,500]})).unwrap();
+        app.run("ui.dock", serde_json::json!({"operation":"close", "panel":"tools"})).unwrap();
+        let mut writer = PrefsWriter { path: Some(path.clone()), ..Default::default() };
+        writer.save_ui(&app.ui, false).unwrap();
+        let (restored, warning, keep) = load_prefs_at(&path, false);
+        assert!(warning.is_none());
+        assert!(!keep);
+        let mut restored_app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services::default());
+        restored_app.ui = restored.unwrap();
+        restored_app.run("ui.dock", serde_json::json!({"operation":"open", "panel":"tools"})).unwrap();
+        assert_eq!(
+            restored_app.ui.docking.as_ref().unwrap().layout.floating.iter().find(|g| g.panels.contains(&Panel::Tools)).unwrap().rect,
+            [70.0, 80.0, 310.0, 500.0]
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn future_docking_preserves_library_settings_and_the_original_preferences_file() {
+        let d = dir("future-docking");
+        let path = d.join("ui.json");
+        let mut ui = UiState { thumb_size: 210.0, filmstrip: false, ..Default::default() };
+        ui.settings.library_path = "/Volumes/Photos/Synthetic Library".into();
+        for docking in [serde_json::json!({"layout":{"root":{"FutureLayout":{}}}}), serde_json::json!(false)] {
+            let mut saved = serde_json::to_value(&ui).unwrap();
+            saved["docking"] = docking;
+            assert!(serde_json::from_value::<UiState>(saved.clone()).is_err(), "runtime state parsing stays strict");
+            let bytes = serde_json::to_vec(&saved).unwrap();
+            for set_aside in [false, true] {
+                std::fs::write(&path, &bytes).unwrap();
+                let (loaded, warning, keep) = load_prefs_at(&path, set_aside);
+                let loaded = loaded.unwrap();
+                assert_eq!(loaded.settings.library_path, ui.settings.library_path);
+                assert_eq!(loaded.thumb_size, ui.thumb_size);
+                assert!(!loaded.filmstrip);
+                assert!(loaded.docking.is_none());
+                assert!(warning.unwrap().contains("Other settings were loaded"));
+                assert!(keep);
+                let mut writer = PrefsWriter { path: Some(path.clone()), keep_file: keep, ..Default::default() };
+                writer.save_ui(&loaded, false).unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "a future layout does not rename or replace the settings file");
+            }
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
     /// Issue #164: the writer saves changed settings to its file — and nothing at all without one
     /// (`--memory`) or while the session is the temporary one offered when the library can't open.
     #[test]
@@ -1057,5 +1144,18 @@ mod tests {
         let (loaded, warning, _) = load_prefs_at(&path, true);
         assert!(loaded.is_some() && warning.is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod config_path_tests {
+    use super::*;
+
+    #[test]
+    fn config_override_keeps_panic_log_in_isolated_profile() {
+        let temp = std::path::PathBuf::from("temp");
+        assert_eq!(panic_log_path_with(|_| Some("isolated".into()), temp.clone()), std::path::PathBuf::from("isolated/lightcraft-panics.log"));
+        assert_eq!(panic_log_path_with(|_| None, temp.clone()), temp.join("lightcraft-panics.log"));
+        assert_eq!(panic_log_path_with(|_| Some("".into()), temp.clone()), temp.join("lightcraft-panics.log"));
     }
 }

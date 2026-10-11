@@ -107,7 +107,7 @@ pub(crate) fn follow(app: &mut LightcraftApp, from: &str, to: &str) {
 /// The pointer is on the part of `rect` that is shown: inside it and inside the panel's visible
 /// (scrolled) area, so a drop never lands on a row or title hidden under the top bar.
 fn shown_under(ui: &egui::Ui, rect: Rect, pointer: Option<egui::Pos2>) -> bool {
-    pointer.is_some_and(|p| rect.contains(p) && ui.clip_rect().contains(p))
+    crate::docking::drop_target(ui, rect, pointer)
 }
 
 /// A keyword being dragged, each frame (after the panels, which take the drop): its name follows

@@ -22,6 +22,34 @@ that hit an error reply should reconnect. The port has no authentication, so onl
 mode ([mcp.md](mcp.md)) is a thin layer over this channel. Implementation:
 `crates/ui-egui/src/control.rs` (methods) and `apps/lightcraft/src/control_server.rs` (transport).
 
+## Isolated automation profiles
+
+Set `LIGHTCRAFT_CONFIG_DIR` to a fresh directory to isolate UI preferences, app logs, the emergency
+panic log, the GPU initialization marker, camera profiles and default model folders. The nonempty
+value is used as the complete settings directory. Unset retains the normal platform paths; an explicit
+empty value disables the settings directory, while the emergency panic log retains its system-temp path.
+Explicit model-directory environment variables still take precedence over their defaults.
+Also pass `--library DIR` with a separate scratch library: the configuration override does not change
+the default photo-library location. Do not use `--memory` or `LIGHTCRAFT_NO_PREFS` when testing persistence.
+
+A native acceptance run must reject the stderr message `rendering headlessly`: `ui.screenshot`
+automatically uses the CPU fallback after two seconds without a presented frame. That fallback is useful
+for headless scripts, but cannot establish native-window acceptance. Control input injects egui events;
+it does not establish operating-system input delivery or screen-reader acceptance.
+
+On macOS, the native menu owns its keyboard accelerators. `ui.key` injects egui key events and
+does not synthesize the Cocoa menu events for those shortcuts. Use `ui.menu.invoke` with the
+command ID (for example `edit.undo`, `edit.redo`, `view.filmstrip` or `view.leftPanel`) to test
+their command behavior. That API invokes the app command dispatcher directly; it does not traverse
+Cocoa menu dispatch. Native menu activation and keyboard accelerator delivery require a separate test.
+
+Before capturing a finished Detail view, poll `ui.inspect` until the expected `loupe.photo` is active,
+`loupe.source` is `render` or `cached`, `loupe.pending` is false, and the render queues are empty.
+For the loupe, `cached` is a prior view render keyed by the current photo and develop settings;
+`thumb`, `small` and `embedded` are separate fallback sources. A presented frame can otherwise
+contain an in-progress rendering placeholder. Require loaded thumbnail textures only when the
+filmstrip is visible.
+
 ## Methods
 
 | Method | Params | Result |
@@ -127,3 +155,22 @@ one pixel.
   renders are in flight. Each request runs frames until it is answered and its injected input
   (clicks, keys, drags) has played out. Widget ids for `ui.clickWidget` come from `ui.widgets`
   (e.g. `button:upright-auto`). A 1600×1000 demo snapshot takes ~1–2 s (debug build).
+
+## Panel docking
+
+Library, Tools, and Presets panels can be regrouped, split, floated within the app window, closed, and reopened. Tools keeps the current Edit/Crop/Masking mode; the photo view and filmstrip stay together. The document/session view is protected. Layouts, active tabs, panel visibility, and floating rectangles are saved with the app's existing UI preferences. These operations do not edit document contents.
+
+Panel IDs: `library`, `tools`, `presets`. The protected center is `canvas`.
+
+`ui.dock` accepts `operation` and `panel`. Operations are `open`, `close`, `activate`, `float` (with finite positive `rect: [x, y, width, height]`), or `move` (with `target` and `zone: center|left|right|top|bottom`). Center groups with the target; side zones split beside it. `ui.dock.reset` restores the default arrangement. Invalid moves return an error without changing the layout.
+
+Invoke these UI commands through `engine.execute`, for example `{"command":"ui.dock","params":{"operation":"float","panel":"tools","rect":[100,100,320,440]}}`.
+
+Advanced `ui.dock` operations use the same validated transaction as pointer gestures:
+`moveFloating` updates `rect`, `resizeSplit` accepts a boolean child `path` and
+`size` (`{"Ratio":0.5}`, `{"FixedFirst":280}`, or `{"FixedSecond":280}`),
+`setStackOpen` takes `open`, and `resizeStack` takes a point `height` or null.
+A center `move` can include `before` (panel ID or null to append) for tab order.
+The equivalent `{"action": ...}` form accepts a serialized shared docking action;
+this is also the form emitted by the renderer. Protected-canvas and app-specific panel
+rules apply equally to both forms.

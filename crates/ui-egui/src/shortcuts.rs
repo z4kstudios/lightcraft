@@ -300,12 +300,33 @@ fn grid_bracket_command(keymap: &Keymap, grid: bool, id: &'static str, shortcut:
     if keymap.iter().any(|(other, sc)| other != id && find_bindable(other).is_some() && parse(sc) == Some(shortcut)) { None } else { Some(command) }
 }
 
+/// Content widgets keep keyboard ownership, including text fields and arrow-driven sliders.
+/// Dock chrome owns activation, traversal, resizing and cancellation; its other keys reach commands.
+fn keyboard_owned(app: &LightcraftApp, ctx: &egui::Context) -> bool {
+    if !ctx.egui_wants_keyboard_input() {
+        return false;
+    }
+    let chrome = app
+        .ui
+        .docking
+        .as_ref()
+        .is_some_and(|workspace| craft_ui::docking::DockArea::new(egui::Id::new("lightcraft-docking")).chrome_has_focus(ctx, &workspace.layout));
+    if !chrome {
+        return true;
+    }
+    ctx.input(|input| {
+        [Key::Enter, Key::Space, Key::Tab, Key::Escape, Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown]
+            .iter()
+            .any(|key| input.key_pressed(*key))
+    })
+}
+
 pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
     if !matches!(app.ui.dialog, Some(crate::state::Dialog::Shortcuts)) {
         app.recording_shortcut = None;
     }
     // don't steal keys from text fields or from the keymap editor recording a shortcut
-    if ctx.egui_wants_keyboard_input() || app.recording_shortcut.is_some() || app.ui.name_edit.is_some() {
+    if keyboard_owned(app, ctx) || app.recording_shortcut.is_some() || app.ui.name_edit.is_some() {
         return;
     }
     let mut fire: Vec<String> = Vec::new();

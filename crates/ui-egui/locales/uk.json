@@ -2070,5 +2070,13 @@
   "Downloading model": "Завантаження моделі",
   "Finding faces": "Пошук облич",
   "Synchronizing folder": "Синхронізація папки",
-  "Looking for changes": "Пошук змін"
+  "Looking for changes": "Пошук змін",
+  "Arrange Panel": "Arrange Panel",
+  "Close panel": "Close panel",
+  "Float panel": "Float panel",
+  "Move to group": "Move to group",
+  "Panels": "Panels",
+  "Reset Panel Layout": "Reset Panel Layout",
+  "Resize panel window": "Resize panel window",
+  "Resize panels": "Resize panels"
 }

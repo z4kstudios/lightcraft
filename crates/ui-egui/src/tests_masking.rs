@@ -143,6 +143,16 @@ fn mask_adjustments_hide_overlay_without_disabling_the_mask() {
     // Changing the shape needs the overlay; changing the image needs an unobscured preview.
     exec(&mut h, "mask.refine", json!({"value": 10.0}));
     assert!(h.app.ui.mask_overlay);
+    // The dock header pushes this adjustment below the initial viewport. Exercise the
+    // actual visible slider rather than sending a synthetic click outside its clipped body.
+    let panel = h.app.widgets.iter().find(|(id, _)| id == "panel:right_panel").unwrap().1;
+    let slider = h.app.widgets.iter().find(|(id, _)| id == "slider:exposure").unwrap().1;
+    assert!(!panel.contains_rect(slider), "exposure initially needs scrolling: {slider:?} in {panel:?}");
+    h.request("ui.move", json!({"x": panel.center().x, "y": panel.center().y}), T);
+    h.request("ui.scroll", json!({"dy": -160.0}), T);
+    h.settle(SETTLE);
+    let slider = h.app.widgets.iter().find(|(id, _)| id == "slider:exposure").unwrap().1;
+    assert!(panel.contains_rect(slider), "exposure is visible before clicking: {slider:?} in {panel:?}");
     let r = h.request("ui.clickWidget", json!({"id": "slider:exposure", "fx": 0.7}), T);
     assert_eq!(r["ok"], true, "{r}");
     assert!(!h.app.ui.mask_overlay, "the exposure slider hides the overlay after release");

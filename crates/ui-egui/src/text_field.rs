@@ -194,7 +194,9 @@ impl<'a> TextField<'a> {
         let right = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary) || i.pointer.button_released(egui::PointerButton::Secondary));
         let selection = egui::text_edit::TextEditState::load(ui.ctx(), id).and_then(|s| s.cursor.char_range());
         let mut response = ui.add(edit);
-        if right && response.contains_pointer() {
+        // The menu may take focus on a primary-button release. egui collapses a
+        // TextEdit selection when focus leaves; retain the range our own menu acts on.
+        if right && response.contains_pointer() || memo.menu_open && !ui.memory(|m| m.has_focus(id)) {
             let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
             state.cursor.set_char_range(selection);
             state.store(ui.ctx(), id);
@@ -512,6 +514,20 @@ mod tests {
         rig.menu("selectAll");
         rig.type_text("Kyoto");
         assert_eq!(rig.text, "Kyoto");
+    }
+
+    #[test]
+    fn clicking_back_into_field_dismisses_its_menu_and_places_a_new_caret() {
+        let mut rig = Rig::new("Lisbon");
+        rig.select_all_by_keys();
+        rig.click(FIELD, PointerButton::Secondary);
+        let rect = rig.rect(FIELD).unwrap();
+        rig.click_at(egui::pos2(rect.left() + 2.0, rect.center().y), PointerButton::Primary);
+        let range = egui::text_edit::TextEditState::load(&rig.view.ctx, id(FIELD)).unwrap().cursor.char_range().unwrap();
+        assert!(range.is_empty(), "a click back in the field places a caret: {range:?}");
+        rig.type_text("X");
+        assert_eq!(rig.text, "XLisbon");
+        assert!(rig.endings.is_empty(), "dismissing into the field keeps the edit open");
     }
 
     /// With nothing selected, Cut and Copy are greyed out: clicking one does nothing, as in a native
