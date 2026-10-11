@@ -3201,6 +3201,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightcraft-inpaint"
+version = "0.6.0"
+dependencies = [
+ "candle-core",
+ "lightcraft-fetch",
+ "log",
+ "thiserror 2.0.21",
+ "zip",
+]
+
+[[package]]
 name = "lightcraft-mcp"
 version = "0.6.0"
 dependencies = [
