@@ -436,6 +436,8 @@ pub struct UiState {
     pub remove_size: f32,
     pub remove_feather: f32,
     pub remove_opacity: f32,
+    /// Remove mode fills strokes with the AI model (Z4K AI Remove) when it is installed.
+    pub remove_ai: bool,
     /// Selected Point Color sample.
     pub point_color: usize,
     /// Point Color "Visualize range": the selected sample's range in colour, the rest grey.
@@ -854,6 +856,7 @@ impl Default for UiState {
             remove_size: 0.02,
             remove_feather: 50.0,
             remove_opacity: 100.0,
+            remove_ai: true,
             point_color: 0,
             point_color_visualize: false,
             hdr_visualize: false,

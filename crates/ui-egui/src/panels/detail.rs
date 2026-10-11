@@ -1878,6 +1878,15 @@ fn remove_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respo
             _ => "remove",
         };
         let pts: Vec<[f64; 2]> = points.iter().map(|q| [q.x, q.y]).collect();
+        if mode == "remove" && app.ui.remove_ai && super::right::ai_remove_status(app).is_some_and(|st| st["installed"] == true) {
+            match app.run("spot.aiRemove", json!({"points": pts, "size": app.ui.remove_size})) {
+                Ok(_) => {
+                    let _ = app.run("spot.update", json!({"opacity": app.ui.remove_opacity}));
+                }
+                Err(e) => app.toast_error(ui.ctx(), e),
+            }
+            return;
+        }
         let _ = app.run(
             "spot.add",
             json!({"mode": mode, "points": pts, "size": app.ui.remove_size, "feather": app.ui.remove_feather, "opacity": app.ui.remove_opacity}),

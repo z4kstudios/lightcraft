@@ -344,6 +344,44 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     }
 }
 
+/// `aiRemove.status`, or `None` when this build has no AI Remove (Z4K).
+pub(crate) fn ai_remove_status(app: &mut LightcraftApp) -> Option<serde_json::Value> {
+    app.run("aiRemove.status", json!({})).ok()
+}
+
+/// Remove mode: the AI toggle, and the model download while it isn't installed (Z4K AI Remove).
+fn ai_remove_toggle(app: &mut LightcraftApp, ui: &mut egui::Ui) {
+    let Some(st) = ai_remove_status(app) else { return };
+    ui.add_space(6.0);
+    ui.checkbox(&mut app.ui.remove_ai, crate::i18n::tr("AI Remove"))
+        .on_hover_text(crate::i18n::tr("Fill what you paint over with the AI model (LaMa): it rebuilds the background from its surroundings"));
+    if !app.ui.remove_ai {
+        return;
+    }
+    if st["installed"] == true {
+        let _ = app.run("aiRemove.warm", json!({}));
+        return;
+    }
+    let dim = Tokens::get(ui.ctx()).text_dim;
+    if st["downloading"] == true {
+        let (done, total) = (st["done"].as_f64().unwrap_or(0.0), st["total"].as_f64().unwrap_or(1.0).max(1.0));
+        ui.add(egui::ProgressBar::new((done / total) as f32).text(crate::i18n::tr("Downloading the AI model…")));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        return;
+    }
+    if let Some(e) = st["error"].as_str() {
+        ui.label(egui::RichText::new(format!("{} {e}", crate::i18n::tr("Download failed:"))).color(dim));
+    }
+    ui.label(egui::RichText::new(crate::i18n::tr("The AI model isn't installed: strokes heal instead.")).color(dim));
+    if text_button(ui, "aiRemoveInstall", crate::i18n::tr("Download AI Model (206 MB)"), false)
+        .on_hover_text(crate::i18n::tr("big-lama, Apache-2.0 · downloaded once, then everything runs offline on this computer"))
+        .clicked()
+        && let Err(e) = app.run("aiRemove.install", json!({}))
+    {
+        app.toast_error(ui.ctx(), e);
+    }
+}
+
 fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     let d = app.session.develop_of(id).unwrap_or_default();
     header(ui, "Remove");
@@ -355,6 +393,9 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 }
             }
         });
+        if app.ui.tool == "remove" {
+            ai_remove_toggle(app, ui);
+        }
         ui.add_space(8.0);
         ui.label(crate::i18n::tr_format!("{} spot(s) on this photo", d.spots.len()));
         ui.add_space(4.0);
@@ -386,6 +427,7 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         (app.ui.remove_size, app.ui.remove_feather, app.ui.remove_opacity) = (sp.size as f32, sp.feather as f32, sp.opacity as f32);
         divider(ui);
         let mode = match sp.mode {
+            _ if sp.fill.is_some() => "AI Remove",
             lightcraft_develop::SpotMode::Heal => "Heal",
             lightcraft_develop::SpotMode::Clone => "Clone",
             lightcraft_develop::SpotMode::Remove => "Remove",
@@ -408,7 +450,11 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         (plain("ui.removeFeather", "Feather", 0.0, 100.0, 50.0), "feather", app.ui.remove_feather as f64),
         (plain("ui.removeOpacity", "Opacity", 0.0, 100.0, 100.0), "opacity", app.ui.remove_opacity as f64),
     ];
+    let ai_spot = sel.as_ref().is_some_and(|(_, sp)| sp.fill.is_some());
     for (spec, key, v) in sliders {
+        if ai_spot && key == "feather" {
+            continue; // an AI fill blends by its own margin (see pipeline::spots::FILL_FADE_OUT)
+        }
         let out = slider(ui, &spec, v, true, None);
         let scale = if key == "size" { 1000.0 } else { 1.0 };
         if let Some(v) = out.value {
@@ -425,7 +471,14 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if sel.is_some() {
         padded(ui, |ui| {
             ui.horizontal(|ui| {
-                if text_button(ui, "spotRefresh", crate::i18n::tr("Refresh Source (/)"), false).clicked() {
+                if sel.as_ref().is_some_and(|(_, sp)| sp.fill.is_some()) {
+                    if text_button(ui, "spotRefill", crate::i18n::tr("Refill (AI)"), false).clicked()
+                        && let Some((i, _)) = &sel
+                        && let Err(e) = app.run("spot.aiRemove", json!({"index": i}))
+                    {
+                        app.toast_error(ui.ctx(), e);
+                    }
+                } else if text_button(ui, "spotRefresh", crate::i18n::tr("Refresh Source (/)"), false).clicked() {
                     let _ = app.run("spot.refreshSource", json!({}));
                 }
                 if text_button(ui, "spotDelete", crate::i18n::tr("Delete (⌫)"), false).clicked() {

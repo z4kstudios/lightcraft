@@ -104,6 +104,28 @@ fn loaded(c: &str) -> Result<Arc<lightcraft_inpaint::Inpainter>> {
     Ok(l)
 }
 
+/// Load the model and run one tiny fill on a background thread (Metal compiles its kernels on
+/// first use), so the first stroke doesn't wait ~3 s. Does nothing when not installed or loaded.
+fn warm() -> Value {
+    static WARMING: AtomicBool = AtomicBool::new(false);
+    let loaded_now = model().lock().unwrap_or_else(PoisonError::into_inner).is_some();
+    if loaded_now || installed().is_none() || WARMING.swap(true, Ordering::SeqCst) {
+        return json!({"warming": WARMING.load(Ordering::SeqCst), "loaded": loaded_now});
+    }
+    let spawned = std::thread::Builder::new().name("lama-warm".into()).spawn(|| {
+        if let Ok(l) = loaded("aiRemove.warm") {
+            let (w, h) = (64, 64);
+            let mask: Vec<f32> = (0..w * h).map(|i| if (20..44).contains(&(i % w)) && (20..44).contains(&(i / w)) { 1.0 } else { 0.0 }).collect();
+            let _ = l.fill(&vec![0.5; w * h * 3], &mask, w, h);
+        }
+        WARMING.store(false, Ordering::SeqCst);
+    });
+    if spawned.is_err() {
+        WARMING.store(false, Ordering::SeqCst);
+    }
+    json!({"warming": true, "loaded": false})
+}
+
 /// The fill for spot `i` of `dd` (the active photo's settings).
 pub(crate) fn compute(s: &mut Session, dd: &lightcraft_develop::DevelopSettings, i: usize, c: &str) -> Result<lightcraft_develop::SpotFill> {
     let t = std::time::Instant::now();
@@ -158,6 +180,7 @@ pub(crate) fn fill_spot(s: &mut Session, i: usize, c: &str, label: &str) -> Resu
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "aiRemove.status", "AI Remove Status", [], None, "{} → {installed, downloading, done, total, error, modelDir, sizeBytes, licence}", always, |_, _| Ok(status())),
+        cmd!(query "aiRemove.warm", "Prepare AI Remove", [], None, "{} — loads the model in the background so the first stroke is quick → {warming, loaded}", always, |_, _| Ok(warm())),
         cmd!(
             "aiRemove.install",
             "Download AI Remove Model",
