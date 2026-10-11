@@ -1,19 +1,19 @@
-//! Compares the Rust LaMa with the PyTorch TorchScript reference on a synthetic 128 × 96 image.
-//! Ignored by default: needs the real model (`LIGHTCRAFT_LAMA_PT`) and the reference tensors
-//! (`LIGHTCRAFT_LAMA_REF`, a folder with `ref_img.f32`, `ref_mask.f32`, `ref_out.f32`, planar).
+//! Compares the Rust LaMa with the PyTorch TorchScript reference on a synthetic 128 × 96 image,
+//! on the CPU and on the default device (Metal on macOS).
+//! Ignored by default: needs the real model (`LIGHTCRAFT_LAMA_PT`). The reference tensors
+//! (`ref_img.f32`, `ref_mask.f32`, `ref_out.f32`, planar) are in `tests/data`, or in `LIGHTCRAFT_LAMA_REF`.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::path::PathBuf;
 
 fn read(p: PathBuf) -> Vec<f32> {
-    std::fs::read(p).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+    std::fs::read(p).unwrap().as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
 }
 
-#[test]
-#[ignore]
-fn matches_pytorch_reference() {
+fn check(device: &candle_core::Device) {
     let model = PathBuf::from(std::env::var("LIGHTCRAFT_LAMA_PT").unwrap());
-    let dir = PathBuf::from(std::env::var("LIGHTCRAFT_LAMA_REF").unwrap());
+    let dir =
+        std::env::var("LIGHTCRAFT_LAMA_REF").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data"));
     let (w, h) = (128, 96);
     let img = read(dir.join("ref_img.f32"));
     let mask = read(dir.join("ref_mask.f32"));
@@ -26,17 +26,31 @@ fn matches_pytorch_reference() {
         }
     }
     let t = std::time::Instant::now();
-    let lama = lightcraft_inpaint::Inpainter::load_on(&model, &candle_core::Device::Cpu).unwrap();
-    eprintln!("load {:?}", t.elapsed());
-    let t = std::time::Instant::now();
-    let got = lama.fill(&rgb, &mask, w, h).unwrap();
-    eprintln!("fill {:?}", t.elapsed());
-    let mut max: f32 = 0.0;
-    for i in 0..n {
-        for c in 0..3 {
-            max = max.max((got[i * 3 + c] - want[c * n + i]).abs());
+    let lama = lightcraft_inpaint::Inpainter::load_on(&model, device).unwrap();
+    eprintln!("{device:?}: load {:?}", t.elapsed());
+    for _ in 0..2 {
+        let t = std::time::Instant::now();
+        let got = lama.fill(&rgb, &mask, w, h).unwrap();
+        eprintln!("{device:?}: fill {:?}", t.elapsed());
+        let mut max: f32 = 0.0;
+        for i in 0..n {
+            for c in 0..3 {
+                max = max.max((got[i * 3 + c] - want[c * n + i]).abs());
+            }
         }
+        eprintln!("{device:?}: max abs diff {max}");
+        assert!(max < 2e-3, "max abs diff {max}");
     }
-    eprintln!("max abs diff {max}");
-    assert!(max < 2e-3, "max abs diff {max}");
+}
+
+#[test]
+#[ignore]
+fn matches_pytorch_reference() {
+    check(&candle_core::Device::Cpu);
+}
+
+#[test]
+#[ignore]
+fn matches_pytorch_reference_on_the_default_device() {
+    check(&lightcraft_inpaint::default_device());
 }

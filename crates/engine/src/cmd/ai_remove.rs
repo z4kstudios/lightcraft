@@ -105,14 +105,37 @@ fn loaded(c: &str) -> Result<Arc<lightcraft_inpaint::Inpainter>> {
 }
 
 /// The fill for spot `i` of `dd` (the active photo's settings).
-fn compute(s: &mut Session, dd: &lightcraft_develop::DevelopSettings, i: usize, c: &str) -> Result<lightcraft_develop::SpotFill> {
+pub(crate) fn compute(s: &mut Session, dd: &lightcraft_develop::DevelopSettings, i: usize, c: &str) -> Result<lightcraft_develop::SpotFill> {
+    let t = std::time::Instant::now();
     let lama = loaded(c)?;
+    let t_load = t.elapsed();
     let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
     let src = s.source_now(id, crate::media::SourceLevel::Full).map_err(|e| bad(c, e))?;
     let info = s.source_info(id);
+    let t_src = t.elapsed();
     let job = lightcraft_pipeline::spots::fill_job(&src, &info, dd, i).ok_or_else(|| bad(c, "the spot is outside the photo"))?;
-    let filled = lama.fill(&job.rgb, &job.mask, job.w, job.h).map_err(|e| bad(c, e.to_string()))?;
-    job.finish(&filled).ok_or_else(|| bad(c, "couldn't store the result"))
+    let t_job = t.elapsed();
+    let filled = lama.fill_at(&job.rgb, &job.mask, job.w, job.h, lightcraft_inpaint::WORK_SIDE).map_err(|e| bad(c, e.to_string()))?;
+    let t_fill = t.elapsed();
+    if let Some(dir) = std::env::var_os("LIGHTCRAFT_AI_REMOVE_DUMP") {
+        let dir = std::path::PathBuf::from(dir);
+        let bytes = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+        let _ = std::fs::write(dir.join(format!("in_{}x{}.f32", job.w, job.h)), bytes(&job.rgb));
+        let _ = std::fs::write(dir.join(format!("mask_{}x{}.f32", job.w, job.h)), bytes(&job.mask));
+        let _ = std::fs::write(dir.join(format!("out_{}x{}.f32", job.w, job.h)), bytes(&filled));
+    }
+    let r = job.finish(&filled).ok_or_else(|| bad(c, "couldn't store the result"));
+    log::info!(
+        "AI Remove {}x{}: model {:?}, source {:?}, job {:?}, fill {:?}, store {:?}",
+        job.w,
+        job.h,
+        t_load,
+        t_src - t_load,
+        t_job - t_src,
+        t_fill - t_job,
+        t.elapsed() - t_fill
+    );
+    r
 }
 
 /// Compute and store the fill of spot `i` of the active photo (one undo step).
@@ -159,7 +182,12 @@ pub fn specs() -> Vec<CommandSpec> {
                 let pts: Vec<Point> = p
                     .get("points")
                     .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(|q| Some(Point::new(q.get(0)?.as_f64()?, q.get(1)?.as_f64()?))).filter(|q| q.x.is_finite() && q.y.is_finite()).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|q| Some(Point::new(q.get(0)?.as_f64()?, q.get(1)?.as_f64()?)))
+                            .filter(|q| q.x.is_finite() && q.y.is_finite())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if pts.is_empty() {
                     return Err(bad(c, "missing points"));

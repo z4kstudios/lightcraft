@@ -38,8 +38,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Largest crop side the model is run on (larger crops are scaled down by the caller).
 pub const MAX_SIDE: usize = 2048;
 
+/// The side [`Inpainter::fill_at`] works at by default. big-lama was trained on 256–512 px crops;
+/// on large holes it continues structure (edges, lines) better at this size than at 1024 px,
+/// where it falls back to a flat blur. It is also about four times faster.
+pub const WORK_SIDE: usize = 512;
+
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::Inpainter;
+pub use native::{Inpainter, default_device};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -47,7 +52,7 @@ mod native {
 
     use candle_core::{Device, Tensor};
 
-    use super::{Error, Result, MAX_SIDE};
+    use super::{Error, MAX_SIDE, Result};
 
     /// The loaded model.
     pub struct Inpainter {
@@ -131,6 +136,73 @@ mod native {
                         let v = out.get(c * np + y * pw + xx).copied().unwrap_or(0.0);
                         if let Some(slot) = res.get_mut(s * 3 + c) {
                             *slot = v;
+                        }
+                    }
+                }
+            }
+            Ok(res)
+        }
+
+        /// [`Inpainter::fill`] at no more than `work_side` px on the long side: a larger crop is
+        /// scaled down (box filter; a mask pixel is set when any pixel under it is), filled, and
+        /// the fill scaled back up (bilinear). Pixels outside `mask` come back unchanged.
+        pub fn fill_at(&self, rgb: &[f32], mask: &[f32], w: usize, h: usize, work_side: usize) -> Result<Vec<f32>> {
+            let n = w.checked_mul(h).ok_or_else(|| Error::Input("image too large".into()))?;
+            if w == 0 || h == 0 || rgb.len() != n * 3 || mask.len() != n {
+                return Err(Error::Input(format!("{w}×{h}: image and mask sizes don't match")));
+            }
+            let k = work_side.max(32) as f64 / w.max(h) as f64;
+            if k >= 1.0 {
+                return self.fill(rgb, mask, w, h);
+            }
+            let (sw, sh) = (((w as f64 * k).round() as usize).max(32), ((h as f64 * k).round() as usize).max(32));
+            let (fx, fy) = (w as f64 / sw as f64, h as f64 / sh as f64);
+            let mut srgb = vec![0.0f32; sw * sh * 3];
+            let mut smask = vec![0.0f32; sw * sh];
+            for y in 0..sh {
+                let (y0, y1) = ((y as f64 * fy) as usize, (((y + 1) as f64 * fy).ceil() as usize).clamp(1, h));
+                for x in 0..sw {
+                    let (x0, x1) = ((x as f64 * fx) as usize, (((x + 1) as f64 * fx).ceil() as usize).clamp(1, w));
+                    let (mut acc, mut cnt, mut m) = ([0.0f32; 3], 0.0f32, 0.0f32);
+                    for yy in y0.min(h - 1)..y1 {
+                        for xx in x0.min(w - 1)..x1 {
+                            let i = yy * w + xx;
+                            for (c, a) in acc.iter_mut().enumerate() {
+                                *a += rgb.get(i * 3 + c).copied().unwrap_or(0.0);
+                            }
+                            cnt += 1.0;
+                            m = m.max(mask.get(i).copied().unwrap_or(0.0));
+                        }
+                    }
+                    let o = y * sw + x;
+                    for (c, a) in acc.iter().enumerate() {
+                        if let Some(slot) = srgb.get_mut(o * 3 + c) {
+                            *slot = a / cnt.max(1.0);
+                        }
+                    }
+                    if let Some(slot) = smask.get_mut(o) {
+                        *slot = m;
+                    }
+                }
+            }
+            let small = self.fill(&srgb, &smask, sw, sh)?;
+            let at = |x: usize, y: usize, c: usize| small.get((y.min(sh - 1) * sw + x.min(sw - 1)) * 3 + c).copied().unwrap_or(0.0);
+            let mut res = rgb.to_vec();
+            for y in 0..h {
+                let sy = ((y as f64 + 0.5) / fy - 0.5).clamp(0.0, (sh - 1) as f64);
+                let (iy, ty) = (sy.floor() as usize, (sy - sy.floor()) as f32);
+                for x in 0..w {
+                    let i = y * w + x;
+                    if mask.get(i).copied().unwrap_or(0.0) <= 0.5 {
+                        continue;
+                    }
+                    let sx = ((x as f64 + 0.5) / fx - 0.5).clamp(0.0, (sw - 1) as f64);
+                    let (ix, tx) = (sx.floor() as usize, (sx - sx.floor()) as f32);
+                    for c in 0..3 {
+                        let top = at(ix, iy, c) * (1.0 - tx) + at(ix + 1, iy, c) * tx;
+                        let bot = at(ix, iy + 1, c) * (1.0 - tx) + at(ix + 1, iy + 1, c) * tx;
+                        if let Some(slot) = res.get_mut(i * 3 + c) {
+                            *slot = top * (1.0 - ty) + bot * ty;
                         }
                     }
                 }

@@ -315,8 +315,11 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
             for x in 0..bw {
                 let (px, py) = ((bx0 + x) as f32 + 0.5, (by0 + y) as f32 + 0.5);
                 let d = pts.iter().map(|p| ((px - p.0).powi(2) + (py - p.1).powi(2)).sqrt()).fold(f32::MAX, f32::min);
-                let inner = r * (1.0 - feather * 0.8);
-                alpha[y * bw + x] = (1.0 - smooth(inner, r, d)) * opacity;
+                let a = match &fill {
+                    Some(_) => 1.0 - smooth(r, r * FILL_FADE_OUT, d),
+                    None => 1.0 - smooth(r * (1.0 - feather * 0.8), r, d),
+                };
+                alpha[y * bw + x] = a * opacity;
                 src[y * bw + x] = match &fill {
                     Some(f) => f.sample(to_norm.apply(Point::new(f64::from(px), f64::from(py)))),
                     None => img.sample_bilinear(px + offset.0, py + offset.1),
@@ -353,6 +356,7 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
         } else {
             None
         };
+        let grain = if fill.is_some() { grain_of(&tgt, &alpha, bw, bh) } else { None };
         for y in 0..bh {
             for x in 0..bw {
                 let i = y * bw + x;
@@ -361,6 +365,13 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
                     continue;
                 }
                 let mut v = src[i];
+                if let Some(g) = grain {
+                    // shot-noise-like: the deviation grows with the square root of the level
+                    let (gx, gy) = ((bx0 + x) as u32, (by0 + y) as u32);
+                    for (c, vc) in v.iter_mut().enumerate() {
+                        *vc += g[c] * vc.max(0.0).sqrt() * gauss(gx, gy, c as u32);
+                    }
+                }
                 if let Some(l) = &low {
                     let d = l.data[i];
                     v = [v[0] + d[0], v[1] + d[1], v[2] + d[2]];
@@ -372,8 +383,63 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
     }
 }
 
+/// The photo's grain around a filled spot, per channel, as the standard deviation of the noise
+/// divided by the square root of the level (shot noise). Measured on the pixels just outside the
+/// stroke: the high-pass of the photo (it minus a small blur), robustly (median absolute
+/// deviation). The model's fill is smooth; without matching grain it reads as a smudge on a
+/// high-ISO photo. `None` when the surroundings are too small to measure.
+fn grain_of(tgt: &[[f32; 3]], alpha: &[f32], w: usize, h: usize) -> Option<[f32; 3]> {
+    let img = Rgb32f { width: w, height: h, data: tgt.to_vec() };
+    let low = lightcraft_raster::blur::gaussian(&img, 1.0);
+    let mut out = [0.0f32; 3];
+    for (c, o) in out.iter_mut().enumerate() {
+        let mut v: Vec<f32> = tgt
+            .iter()
+            .zip(&low.data)
+            .zip(alpha)
+            .filter(|(_, a)| **a <= 0.0)
+            .map(|((t, l), _)| (t[c] - l[c]) / l[c].max(1e-4).sqrt())
+            .filter(|v| v.is_finite())
+            .map(f32::abs)
+            .collect();
+        if v.len() < 64 {
+            return None;
+        }
+        let mid = v.len() / 2;
+        let (_, m, _) = v.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+        // MAD → σ (×1.4826), and undo the σ = 1 px high-pass's damping of white noise (≈ 0.87)
+        *o = (*m * 1.4826 / 0.87).min(1.0);
+    }
+    Some(out)
+}
+
+/// A standard normal number fixed by (x, y, c): the same grain on every render at a given size.
+fn gauss(x: u32, y: u32, c: u32) -> f32 {
+    let hash = |mut v: u32| {
+        v ^= v >> 16;
+        v = v.wrapping_mul(0x7feb_352d);
+        v ^= v >> 15;
+        v = v.wrapping_mul(0x846c_a68b);
+        v ^ (v >> 16)
+    };
+    let a = hash(x.wrapping_mul(0x9e37_79b9) ^ hash(y.wrapping_add(0x632b_e5ab)) ^ c.wrapping_mul(0x85eb_ca6b));
+    let b = hash(a ^ 0x2545_f491);
+    let u1 = ((a >> 8) as f32 + 0.5) / 16_777_216.0;
+    let u2 = (b >> 8) as f32 / 16_777_216.0;
+    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+}
+
 /// Longest side of the crop AI Remove runs the model on.
 pub const FILL_MAX_SIDE: usize = 1024;
+
+/// How far past the stroke (in brush radii) the model refills: a stroke drawn snugly around an
+/// object leaves its edge, shadow and halo just outside, and the model, seeing them, continues
+/// them into the hole.
+pub const FILL_GROW: f64 = 1.3;
+/// Where a filled spot's render fades out (brush radii): solid to the stroke's radius, then a
+/// blend into the photo inside the refilled margin (the stroke's feather isn't used: fading the
+/// fill out inside the stroke would bring back what was removed).
+const FILL_FADE_OUT: f32 = 1.25;
 
 /// What the model needs to fill spot `index` (Z4K AI Remove): a display-encoded crop around the
 /// stroke and a mask of it. Made by [`fill_job`]; turned into a stored fill by [`FillJob::finish`].
@@ -431,12 +497,8 @@ pub fn fill_job(src: &Rgb32f, info: &crate::SourceInfo, s: &lightcraft_develop::
         h: (((ry1 - ry0) * k).ceil() as usize).max(32),
     }
     .clamped(sw, sh);
-    let req = crate::RenderRequest {
-        apply_crop: false,
-        depth: crate::OutputDepth::F32Linear,
-        window: Some(win),
-        ..crate::RenderRequest::fit(sw, sh)
-    };
+    let req =
+        crate::RenderRequest { apply_crop: false, depth: crate::OutputDepth::F32Linear, window: Some(win), ..crate::RenderRequest::fit(sw, sh) };
     let plan = crate::plan(src, info, &base, &req);
     let (w, h) = (plan.w, plan.h);
     let mut img = plan.frame.sample(src, w, h);
@@ -445,21 +507,22 @@ pub fn fill_job(src: &Rgb32f, info: &crate::SourceInfo, s: &lightcraft_develop::
     let to_out_s = frame.norm_to_out(sw, sh);
     let rs = (spot.size * frame.px_per_long(sw)).max(1.0);
     let spts: Vec<(f64, f64)> = spot.points.iter().map(|p| to_out_s.apply(*p)).map(|q| (q.x - win.x as f64, q.y - win.y as f64)).collect();
-    let grow = rs * 1.08 + 2.0;
+    let grow = rs * FILL_GROW + 2.0;
     let mut mask = vec![0.0f32; w * h];
     for y in 0..h {
         for x in 0..w {
             let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
             let d = spts.iter().map(|p| ((px - p.0).powi(2) + (py - p.1).powi(2)).sqrt()).fold(f64::MAX, f64::min);
-            if d <= grow {
-                if let Some(v) = mask.get_mut(y * w + x) {
-                    *v = 1.0;
-                }
+            if d <= grow
+                && let Some(v) = mask.get_mut(y * w + x)
+            {
+                *v = 1.0;
             }
         }
     }
     // exposure for the model: the brightest surroundings (99th percentile) at 0.9
-    let mut lum: Vec<f32> = img.data.iter().zip(&mask).filter(|(_, m)| **m == 0.0).map(|(p, _)| p[0].max(p[1]).max(p[2])).filter(|v| v.is_finite()).collect();
+    let mut lum: Vec<f32> =
+        img.data.iter().zip(&mask).filter(|(_, m)| **m == 0.0).map(|(p, _)| p[0].max(p[1]).max(p[2])).filter(|v| v.is_finite()).collect();
     let gain = if lum.is_empty() {
         1.0
     } else {
@@ -469,7 +532,8 @@ pub fn fill_job(src: &Rgb32f, info: &crate::SourceInfo, s: &lightcraft_develop::
     };
     let rgb: Vec<f32> = img.data.iter().flat_map(|p| p.map(|c| lightcraft_color::transfer::linear_to_srgb((c * gain).clamp(0.0, 1.0)))).collect();
     let to_norm = frame.out_to_norm(sw, sh);
-    let corners = [(win.x, win.y), (win.x + w, win.y), (win.x, win.y + h), (win.x + w, win.y + h)].map(|(x, y)| to_norm.apply(Point::new(x as f64, y as f64)));
+    let corners =
+        [(win.x, win.y), (win.x + w, win.y), (win.x, win.y + h), (win.x + w, win.y + h)].map(|(x, y)| to_norm.apply(Point::new(x as f64, y as f64)));
     let rect = [
         corners.iter().map(|c| c.x).fold(f64::MAX, f64::min),
         corners.iter().map(|c| c.y).fold(f64::MAX, f64::min),
@@ -561,7 +625,7 @@ mod tests {
         let mut s = DevelopSettings::default();
         s.spots.push(Spot { points: vec![Point::new(0.5, 0.5)], size: 14.0 / 160.0, feather: 20.0, ..Default::default() });
         let job = fill_job(&src, &info, &s, 0).unwrap();
-        assert!(job.mask.iter().any(|m| *m > 0.5) && job.mask.iter().any(|m| *m == 0.0));
+        assert!(job.mask.iter().any(|m| *m > 0.5) && job.mask.contains(&0.0));
         let fill = job.finish(&fake_model(&job)).unwrap();
         // stored and read back as in a catalog
         let fill: lightcraft_develop::SpotFill = serde_json::from_str(&serde_json::to_string(&fill).unwrap()).unwrap();

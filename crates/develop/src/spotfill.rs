@@ -91,7 +91,7 @@ impl SpotFill {
             return None;
         }
         let mut out = vec![[0.0f32; 3]; n];
-        let mut q = b.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]]));
+        let mut q = b.as_chunks::<2>().0.iter().map(|p| u16::from_le_bytes(*p));
         for c in 0..3 {
             for y in 0..h {
                 let mut prev = 0u16;

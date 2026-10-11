@@ -50,7 +50,8 @@ impl Archive {
         let err = |e: &dyn std::fmt::Display| Error::Model(format!("{}: {e}", path.display()));
         let file = File::open(path).map_err(|e| err(&e))?;
         let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(|e| err(&e))?;
-        let pkl = zip.file_names().find(|n| n.ends_with("/data.pkl")).map(str::to_owned).ok_or_else(|| err(&"not a TorchScript archive (no data.pkl)"))?;
+        let pkl =
+            zip.file_names().find(|n| n.ends_with("/data.pkl")).map(str::to_owned).ok_or_else(|| err(&"not a TorchScript archive (no data.pkl)"))?;
         let dir = PathBuf::from(pkl.trim_end_matches(".pkl"));
         let reader = zip.by_name(&pkl).map_err(|e| err(&e))?;
         let mut stack = Stack::empty();
@@ -82,7 +83,7 @@ impl Archive {
         let n = info.layout.shape().elem_count();
         let mut bytes = vec![0u8; n.checked_mul(4).ok_or_else(|| Error::Model(format!("{name}: too large")))?];
         r.read_exact(&mut bytes).map_err(|e| Error::Model(format!("{name}: {e} (damaged download?)")))?;
-        let data: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let data: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         if data.iter().any(|v| !v.is_finite()) {
             return Err(Error::Model(format!("{name}: non-finite weights")));
         }

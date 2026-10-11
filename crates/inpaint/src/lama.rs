@@ -151,10 +151,110 @@ impl Ffc {
     }
 }
 
+/// A transposed 3×3 convolution, stride 2, padding 1, output padding 1 (PyTorch weight
+/// `[c_in, c_out, 3, 3]`), as one ordinary 2×2 convolution producing the four output parities,
+/// then a pixel shuffle. Along one axis output `2m` is `x[m]·k1` and output `2m+1` is
+/// `x[m]·k2 + x[m+1]·k0` (`x[n]` = 0), so the 2×2 kernel for parity `a` at tap `d` is `k[KTAP[a][d]]`.
+/// Same result as `conv_transpose2d`, but on the fast im2col + matmul path (candle's transposed
+/// convolution kernel is direct and was the slowest part of the model on Metal).
 struct Up {
-    w: Tensor,
+    w2: Tensor,
+    c_out: usize,
     b: Tensor,
     bn: Affine,
+}
+
+/// The 3-tap index used by output parity `a` at 2×2 tap `d` (`None`: zero).
+const KTAP: [[Option<usize>; 2]; 2] = [[Some(1), None], [Some(2), Some(0)]];
+
+impl Up {
+    fn load(a: &Archive, i: usize, d: &Device) -> Result<Self> {
+        let m = |s: String| format!("generator.model.{s}");
+        let w = a.get(&m(format!("{i}.weight")), d)?;
+        let (c_in, c_out, kh, kw) = w.dims4()?;
+        if (kh, kw) != (3, 3) {
+            return Err(Error::Model(format!("layer {i}: expected a 3×3 kernel, got {kh}×{kw}")));
+        }
+        let wv = w.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
+        // [ (a, b, co), ci, dy, dx ]
+        let mut w2 = vec![0.0f32; 4 * c_out * c_in * 4];
+        for (pa, ra) in KTAP.iter().enumerate() {
+            for (pb, rb) in KTAP.iter().enumerate() {
+                for co in 0..c_out {
+                    for ci in 0..c_in {
+                        for (dy, ky) in ra.iter().enumerate() {
+                            for (dx, kx) in rb.iter().enumerate() {
+                                let (Some(ky), Some(kx)) = (ky, kx) else { continue };
+                                let src = ((ci * c_out + co) * 3 + ky) * 3 + kx;
+                                let dst = ((((pa * 2 + pb) * c_out + co) * c_in + ci) * 2 + dy) * 2 + dx;
+                                if let (Some(v), Some(slot)) = (wv.get(src), w2.get_mut(dst)) {
+                                    *slot = *v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            w2: Tensor::from_vec(w2, (4 * c_out, c_in, 2, 2), d)?,
+            c_out,
+            b: a.get(&m(format!("{i}.bias")), d)?.reshape((1, (), 1, 1))?,
+            bn: Affine::load(a, &m(format!("{}", i + 1)), d)?,
+        })
+    }
+
+    fn apply(&self, x: &Tensor) -> Result<Tensor> {
+        let (b, _, h, w) = x.dims4()?;
+        let x = x.pad_with_zeros(2, 0, 1)?.pad_with_zeros(3, 0, 1)?;
+        let y = x.conv2d(&self.w2, 0, 1, 1, 1)?; // [b, 4·c_out, h, w]
+        let y = y.reshape((b, 2, 2, self.c_out, h, w))?.permute((0, 3, 4, 1, 5, 2))?.contiguous()?;
+        let t = y.reshape((b, self.c_out, 2 * h, 2 * w))?.broadcast_add(&self.b)?;
+        relu(&self.bn.apply(&t)?)
+    }
+}
+
+/// The 7×7 output convolution (64 → 3) without im2col: one matmul to the 3·49 per-tap planes,
+/// then the planes summed at their offsets. (im2col of a full-resolution 64-channel image
+/// is 3136 values per pixel — gigabytes at 1 MP — for a 3-channel result.)
+struct Head {
+    /// `[3·k·k, c_in]`, rows ordered (co, ky, kx).
+    w: Tensor,
+    b: Tensor,
+    k: usize,
+}
+
+impl Head {
+    fn load(a: &Archive, d: &Device) -> Result<Self> {
+        let w = a.get("generator.model.34.weight", d)?;
+        let (c_out, c_in, kh, kw) = w.dims4()?;
+        if kh != kw || c_out != 3 {
+            return Err(Error::Model(format!("output layer: unexpected shape {c_out}×{c_in}×{kh}×{kw}")));
+        }
+        // [co, ci, ky, kx] → [co, ky, kx, ci]
+        let w = w.permute((0, 2, 3, 1))?.contiguous()?.reshape((c_out * kh * kw, c_in))?;
+        Ok(Self { w, b: a.get("generator.model.34.bias", d)?.reshape((1, 3, 1, 1))?, k: kh })
+    }
+
+    fn apply(&self, x: &Tensor) -> Result<Tensor> {
+        let k = self.k;
+        let p = reflect_pad(x, k / 2)?;
+        let (_, c, hp, wp) = p.dims4()?;
+        let (h, w) = (hp + 1 - k, wp + 1 - k);
+        let z = self.w.matmul(&p.reshape((c, hp * wp))?)?.reshape((3, k * k, hp, wp))?;
+        let mut acc: Option<Tensor> = None;
+        for ky in 0..k {
+            for kx in 0..k {
+                let t = z.narrow(1, ky * k + kx, 1)?.narrow(2, ky, h)?.narrow(3, kx, w)?;
+                acc = Some(match acc {
+                    Some(a) => (a + t)?,
+                    None => t.contiguous()?,
+                });
+            }
+        }
+        let t = acc.ok_or_else(|| Error::Model("empty kernel".into()))?.reshape((1, 3, h, w))?;
+        Ok(t.broadcast_add(&self.b)?)
+    }
 }
 
 pub struct Lama {
@@ -166,8 +266,7 @@ pub struct Lama {
     split: (Conv, Affine, Conv, Affine),
     blocks: Vec<(Ffc, Ffc)>,
     up: Vec<Up>,
-    head_w: Tensor,
-    head_b: Tensor,
+    head: Head,
     dft: Mutex<Option<Dft>>,
 }
 
@@ -187,16 +286,7 @@ impl Lama {
         let blocks = (5..5 + N_BLOCKS)
             .map(|i| Ok((Ffc::load(a, &m(&format!("{i}.conv1")), d)?, Ffc::load(a, &m(&format!("{i}.conv2")), d)?)))
             .collect::<Result<Vec<_>>>()?;
-        let up = [24, 27, 30]
-            .iter()
-            .map(|i| {
-                Ok(Up {
-                    w: a.get(&m(&format!("{i}.weight")), d)?,
-                    b: a.get(&m(&format!("{i}.bias")), d)?.reshape((1, (), 1, 1))?,
-                    bn: Affine::load(a, &m(&format!("{}", i + 1)), d)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let up = [24, 27, 30].iter().map(|&i| Up::load(a, i, d)).collect::<Result<Vec<_>>>()?;
         Ok(Self {
             device: device.clone(),
             stem: Conv::load(a, &m("1.ffc.convl2l"), 3, 1, d)?,
@@ -205,8 +295,7 @@ impl Lama {
             split,
             blocks,
             up,
-            head_w: a.get(&m("34.weight"), d)?,
-            head_b: a.get(&m("34.bias"), d)?.reshape((1, 3, 1, 1))?,
+            head: Head::load(a, d)?,
             dft: Mutex::new(None),
         })
     }
@@ -242,10 +331,9 @@ impl Lama {
         }
         let mut t = Tensor::cat(&[&l, &g], 1)?;
         for u in &self.up {
-            t = t.conv_transpose2d(&u.w, 1, 1, 2, 1)?.broadcast_add(&u.b)?;
-            t = relu(&u.bn.apply(&t)?)?;
+            t = u.apply(&t)?;
         }
-        let t = reflect_pad(&t, 3)?.conv2d(&self.head_w, 0, 1, 1, 1)?.broadcast_add(&self.head_b)?;
+        let t = self.head.apply(&t)?;
         Ok(candle_core::Tensor::ones_like(&t)?.broadcast_div(&(t.neg()?.exp()? + 1.0)?)?)
     }
 }

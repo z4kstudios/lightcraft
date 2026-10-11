@@ -5,6 +5,8 @@
 //! `edit.*` (undo/redo), and queries (`catalog.query`, `photo.inspect`, `develop.get`…).
 
 mod activity;
+#[cfg(all(feature = "ai-remove", not(target_arch = "wasm32")))]
+pub mod ai_remove;
 mod before;
 pub(crate) mod browse;
 mod color;
@@ -24,8 +26,6 @@ pub mod library;
 pub mod lut_profiles;
 pub mod manage;
 mod masks;
-#[cfg(all(feature = "ai-remove", not(target_arch = "wasm32")))]
-pub mod ai_remove;
 mod merge;
 pub mod metadata;
 pub mod missing;

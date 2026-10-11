@@ -15,8 +15,8 @@ pub mod spotfill;
 pub use controls::{CONTROLS, ControlSpec, Section, Track};
 pub use presets::{Preset, SettingsGroup, apply_partial, extract_groups};
 pub use segmask::SegMask;
-pub use spotfill::SpotFill;
 pub use settings::*;
+pub use spotfill::SpotFill;
 
 use serde_json::Value;
 
