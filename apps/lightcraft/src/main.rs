@@ -698,6 +698,9 @@ fn main() -> eframe::Result {
             _ => files.push(a),
         }
     }
+    // Z4K build: the control channel (loopback only) is always on, so Claude can connect to every
+    // launch (port 7980 unless --control / LIGHTCRAFT_CONTROL_PORT picks another).
+    let control_port = control_port.or(Some(7980));
     // The log file: opened after the arguments, so `--version`, `--help` and a usage error leave
     // no file behind. Records logged until now are written to it first.
     let mut log_file = None;
