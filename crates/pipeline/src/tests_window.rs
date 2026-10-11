@@ -273,6 +273,7 @@ fn with_spot(mode: lightcraft_develop::SpotMode, at: (f64, f64), offset: Option<
         feather: 30.0,
         opacity: 100.0,
         source_offset: offset.map(|(x, y)| Point::new(x, y)),
+        fill: None,
     });
     s
 }

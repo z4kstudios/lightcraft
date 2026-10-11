@@ -171,6 +171,7 @@ pub fn window_for_reads_checked(
             // the box `apply` works in: the stroke plus a radius, plus a radius of padding
             let t = [x0 - 2.0 * r, y0 - 2.0 * r, x1 + 2.0 * r, y1 + 2.0 * r];
             let s = match spot.source_offset {
+                _ if spot.fill.is_some() => t,
                 Some(o) => {
                     let b = to_out.apply(o);
                     let (dx, dy) = (b.x - origin.x, b.y - origin.y);
@@ -236,6 +237,29 @@ pub fn window_for_reads_checked(
 }
 
 /// Apply all spots to `img` (output resolution). `ppl` = output pixels per long-edge unit.
+/// A decoded [`lightcraft_develop::SpotFill`].
+struct FillImage {
+    rect: [f64; 4],
+    w: usize,
+    h: usize,
+    px: Vec<[f32; 3]>,
+}
+
+impl FillImage {
+    /// Bilinear sample at normalized point `p` (edges extended).
+    fn sample(&self, p: Point) -> [f32; 3] {
+        let [x0, y0, x1, y1] = self.rect;
+        let fx = ((p.x - x0) / (x1 - x0) * self.w as f64 - 0.5).clamp(0.0, (self.w - 1) as f64);
+        let fy = ((p.y - y0) / (y1 - y0) * self.h as f64 - 0.5).clamp(0.0, (self.h - 1) as f64);
+        let (ix, iy) = (fx.floor() as usize, fy.floor() as usize);
+        let (jx, jy) = ((ix + 1).min(self.w - 1), (iy + 1).min(self.h - 1));
+        let (tx, ty) = ((fx - ix as f64) as f32, (fy - iy as f64) as f32);
+        let g = |x: usize, y: usize| self.px.get(y * self.w + x).copied().unwrap_or([0.0; 3]);
+        let (a, b, c, d) = (g(ix, iy), g(jx, iy), g(ix, jy), g(jx, jy));
+        std::array::from_fn(|k| (a[k] * (1.0 - tx) + b[k] * tx) * (1.0 - ty) + (c[k] * (1.0 - tx) + d[k] * tx) * ty)
+    }
+}
+
 pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
     if spots.is_empty() {
         return;
@@ -253,7 +277,12 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
             })
             .collect();
         let Some(&first) = pts.first() else { continue };
+        // AI Remove: paint the stored fill (sampled through the normalized coordinates it was
+        // made in) instead of a source patch
+        let fill = spot.fill.as_ref().and_then(|f| Some(FillImage { rect: f.bounds()?, w: f.w as usize, h: f.h as usize, px: f.pixels()? }));
+        let to_norm = frame.out_to_norm(w, h);
         let offset = match spot.source_offset {
+            _ if fill.is_some() => (0.0, 0.0),
             Some(o) => {
                 let a = to_out.apply(Point::new(0.0, 0.0));
                 let b = to_out.apply(o);
@@ -288,11 +317,14 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
                 let d = pts.iter().map(|p| ((px - p.0).powi(2) + (py - p.1).powi(2)).sqrt()).fold(f32::MAX, f32::min);
                 let inner = r * (1.0 - feather * 0.8);
                 alpha[y * bw + x] = (1.0 - smooth(inner, r, d)) * opacity;
-                src[y * bw + x] = img.sample_bilinear(px + offset.0, py + offset.1);
+                src[y * bw + x] = match &fill {
+                    Some(f) => f.sample(to_norm.apply(Point::new(f64::from(px), f64::from(py)))),
+                    None => img.sample_bilinear(px + offset.0, py + offset.1),
+                };
                 tgt[y * bw + x] = img.get(bx0 + x, by0 + y);
             }
         }
-        let heal = spot.mode != SpotMode::Clone;
+        let heal = spot.mode != SpotMode::Clone || fill.is_some();
         let low = if heal {
             // Tone correction from the spot's *surroundings* only: normalized convolution of
             // (target − source) over pixels outside the stroke (a membrane-like interpolation).
@@ -340,6 +372,147 @@ pub fn apply(img: &mut Rgb32f, spots: &[Spot], frame: &Frame, ppl: f64) {
     }
 }
 
+/// Longest side of the crop AI Remove runs the model on.
+pub const FILL_MAX_SIDE: usize = 1024;
+
+/// What the model needs to fill spot `index` (Z4K AI Remove): a display-encoded crop around the
+/// stroke and a mask of it. Made by [`fill_job`]; turned into a stored fill by [`FillJob::finish`].
+pub struct FillJob {
+    pub w: usize,
+    pub h: usize,
+    /// Interleaved RGB in 0..1 (sRGB-encoded after scaling by `gain`).
+    pub rgb: Vec<f32>,
+    /// 1 where the model fills, else 0.
+    pub mask: Vec<f32>,
+    /// The scene-linear crop (what the spot stage sees), for the pixels the model leaves alone.
+    lin: Vec<[f32; 3]>,
+    gain: f32,
+    /// Output pixel (of the scaled, uncropped full frame) → normalized coordinates, and back.
+    to_norm: lightcraft_geom::Affine,
+    to_out: lightcraft_geom::Affine,
+    origin: (f64, f64),
+    rect: [f64; 4],
+}
+
+/// The crop and mask AI Remove fills for `s.spots[index]`: the photo as the spot stage sees it
+/// (white-balanced, earlier spots applied, uncropped), around the stroke with room for context,
+/// scaled to at most [`FILL_MAX_SIDE`]. `None` when the spot is missing or lies outside the photo.
+pub fn fill_job(src: &Rgb32f, info: &crate::SourceInfo, s: &lightcraft_develop::DevelopSettings, index: usize) -> Option<FillJob> {
+    let effective = s.effective();
+    let mut base = effective.sdr_rendition().into_owned();
+    let spot = base.spots.get(index)?.clone();
+    base.spots.truncate(index);
+    let frame = crate::frame_for(src, info, &base, false);
+    let (nw, nh) = (frame.ow.round().max(1.0) as usize, frame.oh.round().max(1.0) as usize);
+    let (fw, fh) = frame.fit(nw, nh);
+    let ppl = frame.px_per_long(fw);
+    let to_out = frame.norm_to_out(fw, fh);
+    let r = (spot.size * ppl).max(1.0);
+    let pts: Vec<Point> = spot.points.iter().map(|p| to_out.apply(*p)).collect();
+    let first = pts.first()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x, first.y);
+    for p in &pts {
+        (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+    }
+    let (bw, bh) = (x1 - x0 + 2.0 * r, y1 - y0 + 2.0 * r);
+    let m = (2.0 * r).max(0.6 * bw.max(bh)).max(32.0);
+    let (rx0, ry0) = ((x0 - r - m).max(0.0), (y0 - r - m).max(0.0));
+    let (rx1, ry1) = ((x1 + r + m).min(fw as f64), (y1 + r + m).min(fh as f64));
+    if !(rx1 > rx0 + 1.0 && ry1 > ry0 + 1.0) || ![rx0, ry0, rx1, ry1].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    // scale so the crop fits the model
+    let k = (FILL_MAX_SIDE as f64 / (rx1 - rx0).max(ry1 - ry0)).min(1.0);
+    let (sw, sh) = (((fw as f64 * k).round() as usize).max(1), ((fh as f64 * k).round() as usize).max(1));
+    let win = crate::PixelWindow {
+        x: (rx0 * k).floor() as usize,
+        y: (ry0 * k).floor() as usize,
+        w: (((rx1 - rx0) * k).ceil() as usize).max(32),
+        h: (((ry1 - ry0) * k).ceil() as usize).max(32),
+    }
+    .clamped(sw, sh);
+    let req = crate::RenderRequest {
+        apply_crop: false,
+        depth: crate::OutputDepth::F32Linear,
+        window: Some(win),
+        ..crate::RenderRequest::fit(sw, sh)
+    };
+    let plan = crate::plan(src, info, &base, &req);
+    let (w, h) = (plan.w, plan.h);
+    let mut img = plan.frame.sample(src, w, h);
+    crate::lin_cpu(&mut img, info, &plan);
+    // the stroke in the scaled frame's pixels
+    let to_out_s = frame.norm_to_out(sw, sh);
+    let rs = (spot.size * frame.px_per_long(sw)).max(1.0);
+    let spts: Vec<(f64, f64)> = spot.points.iter().map(|p| to_out_s.apply(*p)).map(|q| (q.x - win.x as f64, q.y - win.y as f64)).collect();
+    let grow = rs * 1.08 + 2.0;
+    let mut mask = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let d = spts.iter().map(|p| ((px - p.0).powi(2) + (py - p.1).powi(2)).sqrt()).fold(f64::MAX, f64::min);
+            if d <= grow {
+                if let Some(v) = mask.get_mut(y * w + x) {
+                    *v = 1.0;
+                }
+            }
+        }
+    }
+    // exposure for the model: the brightest surroundings (99th percentile) at 0.9
+    let mut lum: Vec<f32> = img.data.iter().zip(&mask).filter(|(_, m)| **m == 0.0).map(|(p, _)| p[0].max(p[1]).max(p[2])).filter(|v| v.is_finite()).collect();
+    let gain = if lum.is_empty() {
+        1.0
+    } else {
+        let i = ((lum.len() - 1) as f64 * 0.99) as usize;
+        let (_, v, _) = lum.select_nth_unstable_by(i, |a, b| a.total_cmp(b));
+        0.9 / v.max(1e-6)
+    };
+    let rgb: Vec<f32> = img.data.iter().flat_map(|p| p.map(|c| lightcraft_color::transfer::linear_to_srgb((c * gain).clamp(0.0, 1.0)))).collect();
+    let to_norm = frame.out_to_norm(sw, sh);
+    let corners = [(win.x, win.y), (win.x + w, win.y), (win.x, win.y + h), (win.x + w, win.y + h)].map(|(x, y)| to_norm.apply(Point::new(x as f64, y as f64)));
+    let rect = [
+        corners.iter().map(|c| c.x).fold(f64::MAX, f64::min),
+        corners.iter().map(|c| c.y).fold(f64::MAX, f64::min),
+        corners.iter().map(|c| c.x).fold(f64::MIN, f64::max),
+        corners.iter().map(|c| c.y).fold(f64::MIN, f64::max),
+    ];
+    Some(FillJob { w, h, rgb, mask, lin: img.data, gain, to_norm, to_out: to_out_s, origin: (win.x as f64, win.y as f64), rect })
+}
+
+impl FillJob {
+    /// The stored fill from the model's result `filled` (interleaved RGB in 0..1, as `rgb`).
+    pub fn finish(&self, filled: &[f32]) -> Option<lightcraft_develop::SpotFill> {
+        let (w, h) = (self.w, self.h);
+        if filled.len() != w * h * 3 {
+            return None;
+        }
+        // back to scene-linear: the model's pixels where it filled, the photo's elsewhere
+        let lin: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                if self.mask.get(i).copied().unwrap_or(0.0) > 0.5 {
+                    std::array::from_fn(|c| lightcraft_color::transfer::srgb_to_linear(filled.get(i * 3 + c).copied().unwrap_or(0.0)) / self.gain)
+                } else {
+                    self.lin.get(i).copied().unwrap_or([0.0; 3])
+                }
+            })
+            .collect();
+        let crop = Rgb32f { width: w, height: h, data: lin };
+        // resample onto a grid along the normalized axes (orientation flips/rotations reorder it)
+        let [x0, y0, x1, y1] = self.rect;
+        let swap = (self.to_norm.apply(Point::new(1.0, 0.0)).y - self.to_norm.apply(Point::new(0.0, 0.0)).y).abs() > 1e-12;
+        let (gw, gh) = if swap { (h, w) } else { (w, h) };
+        let mut out = Vec::with_capacity(gw * gh * 3);
+        for j in 0..gh {
+            for i in 0..gw {
+                let n = Point::new(x0 + (i as f64 + 0.5) / gw as f64 * (x1 - x0), y0 + (j as f64 + 0.5) / gh as f64 * (y1 - y0));
+                let o = self.to_out.apply(n);
+                out.extend_from_slice(&crop.sample_bilinear((o.x - self.origin.0) as f32, (o.y - self.origin.1) as f32));
+            }
+        }
+        lightcraft_develop::SpotFill::new(gw, gh, self.rect, &out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +532,52 @@ mod tests {
         apply(&mut img, &[spot], &frame, frame.px_per_long(120));
         let c = img.get(60, 40);
         assert!((c[0] - 0.26).abs() < 0.03, "{c:?}");
+    }
+
+    /// A stand-in for the model: masked pixels become the mean of the unmasked ones.
+    fn fake_model(job: &FillJob) -> Vec<f32> {
+        let (mut acc, mut n) = ([0.0f32; 3], 0.0f32);
+        for i in 0..job.w * job.h {
+            if job.mask[i] == 0.0 {
+                for c in 0..3 {
+                    acc[c] += job.rgb[i * 3 + c];
+                }
+                n += 1.0;
+            }
+        }
+        let mean = acc.map(|a| a / n);
+        (0..job.w * job.h).flat_map(|i| if job.mask[i] > 0.5 { mean } else { [job.rgb[i * 3], job.rgb[i * 3 + 1], job.rgb[i * 3 + 2]] }).collect()
+    }
+
+    #[test]
+    fn ai_fill_replaces_the_stroke_and_survives_a_reload() {
+        let mut src = Rgb32f::from_fn(160, 120, |_, _| [0.3, 0.3, 0.3]);
+        for y in 50..70 {
+            for x in 70..90 {
+                src.set(x, y, [0.9, 0.05, 0.05]);
+            }
+        }
+        let info = crate::SourceInfo::default();
+        let mut s = DevelopSettings::default();
+        s.spots.push(Spot { points: vec![Point::new(0.5, 0.5)], size: 14.0 / 160.0, feather: 20.0, ..Default::default() });
+        let job = fill_job(&src, &info, &s, 0).unwrap();
+        assert!(job.mask.iter().any(|m| *m > 0.5) && job.mask.iter().any(|m| *m == 0.0));
+        let fill = job.finish(&fake_model(&job)).unwrap();
+        // stored and read back as in a catalog
+        let fill: lightcraft_develop::SpotFill = serde_json::from_str(&serde_json::to_string(&fill).unwrap()).unwrap();
+        s.spots[0].fill = Some(fill);
+        let mut img = src.clone();
+        let frame = Frame::new(160, 120, &s, true);
+        apply(&mut img, &s.spots, &frame, frame.px_per_long(160));
+        let c = img.get(80, 60);
+        assert!((c[0] - 0.3).abs() < 0.03 && (c[1] - 0.3).abs() < 0.03, "{c:?}");
+        // far from the stroke nothing changes
+        assert_eq!(img.get(5, 5), src.get(5, 5));
+        // and at another output size it lands in the same place
+        let mut small = Rgb32f::from_fn(80, 60, |x, y| src.get(x * 2, y * 2));
+        apply(&mut small, &s.spots, &frame, frame.px_per_long(80));
+        let c = small.get(40, 30);
+        assert!((c[0] - 0.3).abs() < 0.05, "{c:?}");
     }
 
     #[test]
