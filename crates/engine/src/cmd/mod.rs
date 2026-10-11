@@ -24,6 +24,8 @@ pub mod library;
 pub mod lut_profiles;
 pub mod manage;
 mod masks;
+#[cfg(all(feature = "ai-remove", not(target_arch = "wasm32")))]
+pub mod ai_remove;
 mod merge;
 pub mod metadata;
 pub mod missing;
@@ -131,6 +133,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(color::specs());
         v.extend(curves::specs());
         v.extend(masks::specs());
+        #[cfg(all(feature = "ai-remove", not(target_arch = "wasm32")))]
+        v.extend(ai_remove::specs());
         v.extend(organize::specs());
         v.extend(keywords::specs());
         v.extend(manage::specs());
