@@ -746,7 +746,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Spot",
             [],
             None,
-            "{index? (the selected spot), move?: [dx,dy] (the target, normalized), source?: [dx,dy] (offset from the target), moveSource?: [dx,dy], size?, feather?, opacity?, mode?}",
+            "{index? (the selected spot), move?: [dx,dy] (the target, normalized), source?: [dx,dy] (offset from the target), moveSource?: [dx,dy], size?, feather?, opacity?, mode?} — moving or resizing an AI Remove spot recomputes its fill (returns aiFill)",
             has_active,
             |s, p| {
                 let c = "spot.update";
@@ -755,33 +755,43 @@ pub fn specs() -> Vec<CommandSpec> {
                     Some(m) => Some(serde_json::from_value(m.clone()).map_err(|e| bad(c, e.to_string()))?),
                     None => None,
                 };
-                spots_edit(s, c, "Edit Spot", |spots| {
-                    let sp = &mut spots[i];
-                    if let Some(d) = point(p, "move") {
-                        sp.points.iter_mut().for_each(|q| *q = Point::new(q.x + d.x, q.y + d.y));
-                        // the source moves along (its offset is relative to the target)
+                let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
+                let mut dd = (*s.develop_of(id).unwrap_or_default()).clone();
+                let Some(sp) = dd.spots.get_mut(i) else {
+                    return Err(bad(c, "no such spot"));
+                };
+                let (moved, sized) = (point(p, "move"), p.get("size").and_then(Value::as_f64));
+                if let Some(d) = moved {
+                    sp.points.iter_mut().for_each(|q| *q = Point::new(q.x + d.x, q.y + d.y));
+                    // the source moves along (its offset is relative to the target)
+                }
+                if let Some(o) = point(p, "source") {
+                    sp.source_offset = Some(o);
+                }
+                if let Some(d) = point(p, "moveSource") {
+                    let o = sp.source_offset.unwrap_or(Point::new(0.0, 0.0));
+                    sp.source_offset = Some(Point::new(o.x + d.x, o.y + d.y));
+                }
+                if let Some(v) = sized {
+                    sp.size = v.clamp(SPOT_SIZE.0, SPOT_SIZE.1);
+                }
+                if let Some(v) = p.get("feather").and_then(Value::as_f64) {
+                    sp.feather = v.clamp(0.0, 100.0);
+                }
+                if let Some(v) = p.get("opacity").and_then(Value::as_f64) {
+                    sp.opacity = v.clamp(0.0, 100.0);
+                }
+                if let Some(m) = mode {
+                    if m != sp.mode {
+                        sp.fill = None; // an AI fill belongs to Remove; Heal/Clone sample a source instead
                     }
-                    if let Some(o) = point(p, "source") {
-                        sp.source_offset = Some(o);
-                    }
-                    if let Some(d) = point(p, "moveSource") {
-                        let o = sp.source_offset.unwrap_or(Point::new(0.0, 0.0));
-                        sp.source_offset = Some(Point::new(o.x + d.x, o.y + d.y));
-                    }
-                    if let Some(v) = p.get("size").and_then(Value::as_f64) {
-                        sp.size = v.clamp(SPOT_SIZE.0, SPOT_SIZE.1);
-                    }
-                    if let Some(v) = p.get("feather").and_then(Value::as_f64) {
-                        sp.feather = v.clamp(0.0, 100.0);
-                    }
-                    if let Some(v) = p.get("opacity").and_then(Value::as_f64) {
-                        sp.opacity = v.clamp(0.0, 100.0);
-                    }
-                    if let Some(m) = mode {
-                        sp.mode = m;
-                    }
-                    Ok(())
-                })?;
+                    sp.mode = m;
+                }
+                let ai = if sp.fill.is_some() && (moved.is_some() || sized.is_some()) { Some(refresh_fill(s, &mut dd, i, c)) } else { None };
+                s.set_develop(id, dd, "Edit Spot")?;
+                if let Some(ai) = ai {
+                    return Ok(json!({"index": i, "aiFill": ai}));
+                }
                 Ok(json!({"index": i}))
             }
         ),
@@ -900,6 +910,30 @@ fn spot_index(s: &Session, p: &Value, c: &str) -> Result<usize> {
         return Err(bad(c, "no such spot"));
     }
     Ok(i)
+}
+
+/// An AI Remove spot whose stroke moved or changed size: recompute its fill from the new place, or
+/// drop it (the spot falls back to Heal) when the model can't run. Returns what happened.
+fn refresh_fill(s: &mut Session, d: &mut lightcraft_develop::DevelopSettings, i: usize, c: &str) -> Value {
+    #[cfg(all(feature = "ai-remove", not(target_arch = "wasm32")))]
+    let why = match super::ai_remove::compute(s, d, i, c) {
+        Ok(f) => {
+            if let Some(sp) = d.spots.get_mut(i) {
+                sp.fill = Some(f);
+            }
+            return json!({"refilled": true});
+        }
+        Err(e) => e.to_string(),
+    };
+    #[cfg(not(all(feature = "ai-remove", not(target_arch = "wasm32"))))]
+    let why = {
+        let _ = (s, c);
+        "AI Remove isn't in this build".to_string()
+    };
+    if let Some(sp) = d.spots.get_mut(i) {
+        sp.fill = None;
+    }
+    json!({"refilled": false, "reason": why})
 }
 
 fn spots_edit(s: &mut Session, c: &str, label: &str, f: impl FnOnce(&mut Vec<Spot>) -> Result<()>) -> Result<()> {

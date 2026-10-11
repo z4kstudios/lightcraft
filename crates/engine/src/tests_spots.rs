@@ -55,3 +55,29 @@ fn spots_select_move_edit_refresh_and_delete() {
     s.execute("library.next", &json!({})).unwrap();
     assert_eq!(s.active_spot, None);
 }
+
+#[test]
+fn moving_an_ai_spot_does_not_keep_a_stale_fill() {
+    let mut s = Session::with_demo();
+    s.execute("spot.add", &json!({"points": [[0.4, 0.5]], "size": 0.02})).unwrap();
+    let id = s.active().unwrap();
+    let mut d = (*s.develop_of(id).unwrap()).clone();
+    d.spots[0].fill = lightcraft_develop::SpotFill::new(2, 2, [0.38, 0.48, 0.42, 0.52], &[0.5; 12]);
+    assert!(d.spots[0].fill.is_some());
+    s.set_develop(id, d, "fill").unwrap();
+    // feather/opacity keep the fill
+    s.execute("spot.update", &json!({"feather": 10})).unwrap();
+    assert!(spots(&s)[0].fill.is_some());
+    // a move recomputes it, or drops it when the model can't run (here: not in the build / not installed)
+    let r = s.execute("spot.update", &json!({"move": [0.1, 0.0]})).unwrap();
+    assert!(r["aiFill"].is_object(), "{r}");
+    if r["aiFill"]["refilled"] == false {
+        assert!(spots(&s)[0].fill.is_none());
+    }
+    // switching to Clone drops a fill
+    let mut d = (*s.develop_of(id).unwrap()).clone();
+    d.spots[0].fill = lightcraft_develop::SpotFill::new(2, 2, [0.48, 0.48, 0.52, 0.52], &[0.5; 12]);
+    s.set_develop(id, d, "fill").unwrap();
+    s.execute("spot.update", &json!({"mode": "clone"})).unwrap();
+    assert!(spots(&s)[0].fill.is_none());
+}
