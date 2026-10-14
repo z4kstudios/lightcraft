@@ -13,6 +13,11 @@
 <h3 align="center">Your photos. Your pixels. Your machine.</h3>
 
 <p align="center">
+  <a href="README.md">English</a> ·
+  <a href="README.zh-hans.md">简体中文</a>
+</p>
+
+<p align="center">
   <b>Photo library and raw development; an open-source, clean-room reimplementation of Adobe Lightroom, rebuilt in pure Rust.</b><br>
   Native on macOS, Windows and Linux. In the browser via WebAssembly. Drivable end to end by AI agents over MCP.
 </p>
@@ -309,6 +314,7 @@ LightCraft is young and moving fast: **alpha**. **Where we honestly stand** (det
   - **camera colour calibration:** Sony, Nikon, Panasonic, Fujifilm and Canon CR3 raws have guarded estimates from their camera JPEGs, with built-in ILCE-7CR, ILCE-7M4, X-H2S and X-T4 profiles; measured calibration is missing, and other raws or rejected fits retain a neutral matrix;
   - **compressed Olympus raws and unsupported CR3 variants:** these use embedded JPEG previews when present. Fujifilm lossless/lossy compressed RAF now decodes sensor data; [verification and existing-library reload instructions](docs/raf-compression.md);
   - **AI masks and denoise:** subject and sky selection are classical heuristics;
+  - **network libraries:** a preview reads the raw's header — or, for a CR3 or a TIFF raw whose preview tag sits past it, exactly the ranges the sparse planner names — and its embedded JPEG only (56.5 MB → 5.9 MB, 10 s → 1 s on the test share), but the *developed* picture still needs the sensor data over the wire; see [docs/raw-preview-reads.md](docs/raw-preview-reads.md);
   - **on-screen HDR display, video and the Classic Print / Book / Map modules.**
 - **What's next:** see [the ranked gaps](docs/gaps.md) and [the roadmap](docs/roadmap.md).
 
@@ -331,7 +337,7 @@ LightCraft is young and moving fast: **alpha**. **Where we honestly stand** (det
 | Import: Add in place / Copy / Move, rename and folder templates, devices, duplicate detection, watched folders; Local folder browsing | ✅ |
 | MCP server (headless or live app, persistent libraries), CLI, control channel | ✅ |
 | XMP sidecars (read/write, auto-write), reading `crs:` develop settings, preset files (`.lcpreset`, XMP presets) | ✅ |
-| Optics (distortion, vignetting, auto + manual CA, defringe, lens corrections embedded in DNG files and Panasonic / Leica RW2 / RWL distortion data), Geometry (transforms, Constrain Crop), Upright (Auto/Level/Vertical/Full/Guided) | ✅ · camera lens profiles (our own) ⬜ |
+| Optics (distortion, vignetting, auto + manual CA, defringe, lens corrections embedded in DNG files, Panasonic / Leica RW2 / RWL distortion data and Nikon Z 6II / Z 8 / Z f distortion data), Geometry (transforms, Constrain Crop), Upright (Auto/Level/Vertical/Full/Guided) | ✅ · camera lens profiles (our own) ⬜ |
 | Photo Merge: HDR (auto-align, deghost), Panorama (spherical/cylindrical/perspective, boundary warp, auto crop), HDR Panorama → DNG | ✅ |
 | GPU pipeline (wgpu compute, CPU-exact within 1/255), CPU fallback on device limits / errors | ✅ · WebGPU in the browser 🚧 |
 | AI: segmentation masks, AI denoise, super resolution, faces; video | 🚧 (see [gaps](docs/gaps.md)) |
@@ -364,6 +370,31 @@ per CPU, otherwise exhaust RAM before any test runs. GPU coverage is unchanged. 
 `CARGO_PROFILE_DEV_DEBUG`, `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` settings
 override these defaults. Ordinary development commands keep their own settings.
 
+**Release builds on memory-constrained machines:** [#1196](https://github.com/storytold/lightcraft/issues/1196)
+reports Arch/AUR release-link OOM kills on a 16 GB machine when the desktop and CLI build concurrently
+with full debug information, thin LTO and one codegen unit. The CI defaults above do not apply to
+ordinary `cargo build --release`. Start with one job; two may be suitable if enough memory is available:
+
+```sh
+CARGO_BUILD_JOBS=1 cargo build --release -p lightcraft -p lightcraft-cli
+# Alternatively: CARGO_BUILD_JOBS=2 cargo build --release -p lightcraft -p lightcraft-cli
+```
+
+If a packaging environment enables full debug information or memory-heavy LTO settings, use
+command-local overrides for a lower-memory source build:
+
+```sh
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release -p lightcraft -p lightcraft-cli
+```
+
+These POSIX-shell assignments affect only this command, not global Cargo configuration or the
+repository's release profiles. Disabling LTO may change performance and binary size; disabling debug
+information reduces debugging detail. This is build guidance, not a guarantee that any machine has
+enough memory. Downstream packagers should serialize large binary builds and avoid full debug
+information combined with LTO and one codegen unit on low-memory builders. A PKGBUILD that exports
+its own profile settings can override inherited variables; adjust the packaging recipe locally or
+contact its maintainer rather than assuming an environment prefix on `makepkg` will take precedence.
+
 **Chinese and Japanese text** need the shared font repo, an optional build input (official releases always include it):
 
 ```sh
@@ -372,14 +403,16 @@ CRAFT_FONTS_DIR=../craft-fonts cargo run --release -p lightcraft
 ```
 
 Without it LightCraft builds and runs the same, but Chinese and Japanese text have no glyphs. Fonts are never committed to this
-repo; see [craftrules `standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md).
+repo — the standard for what goes there lives with it: see the [craft-fonts README](https://github.com/storytold/craft-fonts#readme).
 
 **Interface language:** **Edit → Language** (English, 简体中文, 繁體中文（台灣）, 日本語, Português (Brasil), Español, Deutsch, Русский, Français) or **Settings → General →
 Language**; the choice applies immediately and persists. See [docs/localization.md](docs/localization.md).
 
 **Logs:** the desktop app writes its log to standard error and to `logs/lightcraft.log` in its settings folder
 (Linux `$XDG_CONFIG_HOME/lightcraft/logs/`, by default `~/.config/lightcraft/logs/`; macOS
-`~/Library/Application Support/LightCraft/logs/`; Windows `%APPDATA%\LightCraft\logs\`), never in the library. A
+`~/Library/Application Support/LightCraft/logs/`; Windows `%APPDATA%\LightCraft\logs\`), never in the library.
+**Portable mode:** a file named `portable.txt` (or `LightCraft.portable`) next to the executable moves the settings
+folder to `LightCraftData` beside it. A
 launch from a desktop menu or the Dock has no terminal, so attach this file to a bug report (**Help ▸ Open Log
 Folder** shows it in the file manager). Each start moves the
 previous log to `lightcraft.1.log` and that one to `lightcraft.2.log`, so the log of a run that crashed survives the
@@ -402,6 +435,9 @@ nix run github:storytold/lightcraft                    # the desktop app
 nix build github:storytold/lightcraft                  # → ./result/bin/{lightcraft,lightcraft-cli}
 nix develop github:storytold/lightcraft                # rust toolchain + native deps + fonts
 ```
+
+On NixOS, run a `cargo` build from `nix develop`: outside it the app can't find `libvulkan.so.1`, finds no GPU and
+renders on the CPU, much more slowly (it says so once at start-up). `nix run` and `nix build` set the path themselves.
 
 In a flake configuration (NixOS, home-manager, nix-darwin):
 
@@ -486,6 +522,9 @@ option to start it. For unattended installs: `msiexec /i lightcraft-<ver>-window
 | Tarball | `lightcraft-<ver>-linux-x86_64.tar.gz` | `lightcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
 
 RISC-V (riscv64): `lightcraft-<ver>-linux-riscv64.tar.gz`, a tarball only (glibc 2.39 or newer, e.g. Ubuntu 24.04+).
+
+On a Wayland desktop LightCraft runs through XWayland when it is available, because only X11 gives
+windows file drag-and-drop; set `LIGHTCRAFT_WAYLAND=1` to use native Wayland (sharper fractional scaling, no drop).
 
 ### FreeBSD
 

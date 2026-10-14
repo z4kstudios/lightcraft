@@ -1,6 +1,352 @@
 # What's new in LightCraft
 
+## 2026-10-14
+
+### Hard-edged Heal and Clone spots
+- A spot with Feather at 0 no longer draws black pixels exactly on its radius. This also fixes spots at 0% Opacity
+  changing pixels along their edge. The hard edge now leaves pixels on the radius unchanged.
+
+## 2026-10-13
+
+### HDR merges keep the lens correction
+- An HDR made with Photo ▸ Photo Merge ▸ HDR now keeps the lens correction the photos carry (Sony's, Panasonic's
+  and Leica's, and the one some DNGs carry, e.g. from drones): Optics ▸ Enable Lens Corrections straightens it as it
+  does the photos it was made from. HDRs merged before this don't have it; merge them again.
+
+### Portable mode
+- A file named `portable.txt` next to the LightCraft program makes it keep its settings, logs and downloaded
+  models in a `LightCraftData` folder beside it instead of the per-user settings folder (issue #1200), as
+  PhotoCraft does. If that folder can't be written, the usual folder is used and the log says why.
+
+### Reliability
+- A photo whose Defringe amount was stored far past the sliders' 20 (in a damaged catalog or sidecar) no longer
+  crashes LightCraft each time it renders: the amount acts as 20.
+
+### Reliability
+- Importing a preset zip that unpacks to far more than any preset (a "zip bomb") is refused with a message naming
+  the file, instead of asking for gigabytes of memory, which could end LightCraft.
+
+### Reliability
+- A crop of no size (from an agent or a sidecar) no longer gives the Detail view a photo of no size to lay out
+  (its width over its height was 0 / 0, which stopped debug builds); it shows as a single pixel's colour.
+
+### Reliability
+- A crop a hair wide (or of no size), set by an agent or read from a sidecar, no longer crashes or hangs the
+  render with Clarity, Dehaze, Texture or Highlights / Shadows on: their blurs are held to the picture's size.
+- A crop of no size with healing spots or masks no longer crashes the render: samples outside the picture read its
+  edge.
+
+### Reliability
+- A library whose catalog file was damaged (or edited by hand) in a way that still reads no longer crashes
+  LightCraft when it shows a stack, or hangs it when a folder is moved: on opening, records are put back under
+  their own ids, stacks keep only photos that exist (at least two), folders inside themselves move to the top,
+  and new photos never reuse an id in use. What was repaired is written to the log.
+
+### Nikon lens corrections
+- Raws from the Nikon Z 6II, Z 8 and Z f now open with the camera's own distortion correction, as Lightroom applies a
+  built-in profile: straight lines near the edges stay straight and the framing matches the camera's JPEG. It works
+  with Z lenses and with F-mount lenses on the FTZ adapter, follows the in-body stabilisation's shift of the optical
+  centre, and can be turned off under Lens Corrections. Vignetting correction from the file comes later.
+
+### Thumbnail cache stays in its folder
+- The thumbnail cache no longer follows a shard folder (`thumbs/ab/`) that is a symlink or junction to somewhere
+  else (issue #1504): trimming or clearing the cache can't delete files outside it, and thumbnails are never read
+  from or written through such a link.
+
+### Large libraries: Synchronize Folder, import and sidecars start sooner
+- Opening Synchronize Folder, an import review or an import no longer makes a table of every photo in the library
+  before it looks at the first file. In a library of 3.5 million photos that held the window for about 6 s before
+  a Synchronize scan began (now under 1 s), 2.6 s before an import review (now 0.05 s) and 1.7 s before an import
+  (now 0.05 s). The scan looks up only the files it finds and the contents it reads, on its own thread.
+- Writing one photo's XMP sidecar (Save Metadata to File, or automatically after an edit) no longer works out who
+  owns every shared sidecar name in the library: 2.4 s a write in that library, now under 1 s.
+- Nothing else changes: the same files are found new, already there, moved or missing, and sidecars get the same
+  names.
+
+### Faces load faster in the People view
+- Faces on unedited raws are cut from the camera's preview inside the file instead of developing the raw (issue
+  #1440): a Sony α1 face reads 8 MB instead of 70 MB, an A7S III face about 1 MB instead of 24 MB, several times
+  faster on an external hard disk. A face whose preview is too small, and any edited photo, is still developed from
+  the raw, so it keeps its look.
+- Raws whose preview is in Adobe RGB (Sony α1 among others) no longer read the whole file for their grid thumbnail:
+  only the header and the preview are read, as for other raws.
+- Faces are kept in the thumbnail cache at a few fixed sizes, so moving the thumbnail slider no longer renders them
+  all again.
+
+### Reliability
+- A raw file whose black level is stored as "not a number" (or infinity), or a floating-point DNG with such
+  samples, no longer crashes LightCraft at 1:1 or on export: the bad values read as black.
+
+### Reliability
+- Exporting a photo more than 65,535 times as long as it is wide (a one-pixel strip), or opening the Export dialog's
+  watermark preview for it, no longer crashes LightCraft; the export is capped at the encoders' 65,535 pixels.
+
+### Reliability
+- Dragging a Tone Curve point that sits very close to its neighbours (two clicks side by side, or a curve from a
+  sidecar, a preset or an agent) no longer crashes LightCraft; the point stays between them. Curve points sent to
+  `develop.curve` are kept in order, and a sidecar curve with a "NaN" or "inf" point is ignored.
+
+### Reliability
+- A demo photo whose stored size was damaged (a width of 4294967295) is rendered at its own size instead of
+  one that overflows.
+
+### DNG camera identity
+- DNG export and Convert to DNG no longer duplicate the camera make when the model already
+  contains it: `Canon EOS R6` stays `Canon EOS R6`, rather than `Canon Canon EOS R6` (the camera
+  identity subissue in #840). The separate Make and Model tags keep their original values.
+  This does not change colour matrices, camera calibration or RAW noise rendering.
+### Building from source
+- The English and Simplified Chinese build guides now describe command-local job and release
+  profile overrides for memory-constrained builders (issue #1196), including why packaging
+  recipes can override inherited settings. Default release profiles and application behavior
+  are unchanged; the guidance does not guarantee a build will fit every 16 GB machine.
+### Lightroom catalog import
+- A Lightroom Classic catalog whose changes are all still in its `.lrcat-wal` file (a new catalog Lightroom has
+  open and hasn't written back yet) imports instead of failing with "unsupported SQLite schema format".
+
+### Reliability
+- An export enlarged far past the photo's size (20000 typed for 2000 with Don't Enlarge off) no longer ends
+  LightCraft: an enlargement stops at 512 megapixels, as in Lightroom, and one that needs more memory than the
+  computer has is refused with the size it would take, before it starts.
+
+### Slider drags on large raws
+- Dragging a slider no longer re-renders the edited photo's filmstrip thumbnail on every frame; it follows once you
+  let go. On a 64 MP raw the first of those renders decoded the whole file again, which held up the loupe's
+  previews for up to a second.
+- A thumbnail of the photo open in Detail is made from its already decoded preview instead of decoding the file
+  again.
+### Dehaze while zoomed in
+- With Dehaze on, panning a photo zoomed to 1:1 or moving a slider while zoomed no longer samples the whole
+  original again to find the haze colour. On a 64 MP raw (Sony A7R VI) that took ~0.2 s of CPU per pan and per
+  slider step; a slider step now takes ~5 ms on the GPU.
+### Thumbnails of raw files appear sooner
+- Grid thumbnails and the first picture in the loupe of an unedited raw now come from the smallest JPEG the camera
+  stored that is big enough, not always from the largest one. On a Sony A7R VI file a 512 px thumbnail decodes
+  0.3 MB of JPEG instead of 5.6 MB and is ready several times sooner; Nikon and Panasonic raws with a mid-sized
+  JPEG get faster too.
+## 2026-10-12
+
+### Canon CR2 highlights
+- Blown highlights in CR2 files from the Canon EOS 50D, 60D, 450D (Rebel XSi), 500D (Rebel T1i), 550D (Rebel T2i),
+  1200D (Rebel T5) and 100D (Rebel SL1) now count as clipped (issue #1272). They used to stop at 81–98% of white, so
+  highlight recovery missed them and, darkened, they took a colour cast instead of going neutral grey.
+## 2026-10-12
+
+### Pentax raws without black borders
+- Raws from the Pentax KP, KF, K-3 Mark III (and Monochrome), K-70, K-1, K-1 Mark II, K-S1, K-S2 and 645Z no longer
+  show a black (or, on the 645Z, white) band along one or more edges (issue #1271). The sensor's masked border is
+  left out, so these photos come out a little smaller, closer to the camera's own JPEG. Crops and masks on photos
+  edited earlier may shift by a few pixels.
+## 2026-10-12
+
+### Camera-look deep shadows
+
+- The starting look fitted from a raw's camera JPEG now uses its darkest tones too (issue #1307).
+  Photos with deep shadows no longer have to extend the first measured tone in a straight line to black.
+  Existing smart previews are refreshed when their originals are online, and cached renders are redrawn.
+### Slider drags follow the pointer more closely
+- With a GPU, a slider drag's preview is drawn in the same frame as the slider moves instead of one frame later,
+  when the preview renders in a few milliseconds (it waits at most 40 % of a frame for it; slower renders, such as
+  on the CPU, are not waited for).
+## 2026-10-12
+
+### Kelvin white balance for more Sony cameras
+- Sony ILCA-99M2, ILCA-77M2, SLT-A33, DSC-RX10, ILCE-3500 and ILCE-7S raws now show white balance in Kelvin too,
+  read from the white-balance presets the camera stores in every ARW: a photo shot at 3400 K on the camera reads
+  3396 K, one on the Shade preset 7493 K. As for #730, only the numbers change: edits made on the old relative
+  scale keep their look, and As Shot shows the real temperature once the file is opened.
+## 2026-10-12
+
+### Bold text in other scripts
+- Arabic names and other Arabic text in headings, chosen tabs and other bold places are now drawn bold, as Latin text
+  beside them is; they used to stay at regular weight.
+## 2026-10-12
+
+### Older raw cameras
+- Canon PowerShot G9 raws open with the camera's white balance (White Balance ▸ As Shot); it used to start from a
+  neutral default.
+## 2026-10-12
+
+### Older raw cameras
+- Olympus E-10 raws open with the camera's white balance (White Balance ▸ As Shot) and without the grey haze in
+  the shadows: the black level recorded in the file is now subtracted.
+### Told when there is no GPU
+- When GPU rendering is on but no graphics processor can be found, LightCraft now says so once at start-up instead
+  of quietly rendering everything on the CPU, much more slowly. Help ▸ System Info says why. On NixOS this happens
+  when a `cargo` build runs outside `nix develop` (no Vulkan loader); start it from there.
+## 2026-10-12
+
+### Leaf and Hasselblad raws
+- The Hasselblad Lunar's raws (a Sony NEX-7 inside) now develop from their sensor data with every editing tool,
+  instead of opening as their embedded preview. Photos imported earlier switch over with Photo ▸ Reload from Disk.
+- An uncompressed Leaf Aptus 22 MOS no longer opens as a dark, colourless picture of its sensor mosaic: it imports
+  as a raw and shows its embedded preview (preview only, with the reason), as the compressed MOS files do.
+## 2026-10-12
+
+### Zoomed 64 MP raws stay decoded
+- Panning a photo zoomed to 1:1, or moving a slider while zoomed, no longer decodes the whole raw again each time on
+  high-resolution cameras such as the Sony A7R VI (64 MP). Their decoded original (~800 MB) is bigger than the
+  default cache share (768 MB), so it was evicted as soon as it was stored. The original of the photo shown in Detail
+  now stays, like its preview, until another photo or view is shown.
+- Zooming in with Before/After side by side decodes the original once: the Before side used to decode its own copy
+  beside the After's, and a window asked for again while the first was still decoding (a pan, the layout settling)
+  started yet another decode.
+- A zoomed view keeps the GPU copy of the original while it is on screen: pausing for a few seconds between pans no
+  longer frees it, which cost a re-upload of about a second on the next pan (800 MB for a 64 MP raw). It is freed
+  once you zoom out or move on.
+- The kept original no longer pushes everything else out of the cache: on a 64 MP raw it filled the cache share
+  alone, so the photo's preview and thumbnail sources and its neighbours' were decoded from the raw again on every
+  edit at 1:1, every zoom out and every step to the next photo.
+
+## 2026-10-11
+
+### HDR and panorama merges of CR2 keep their colour
+- Photo Merge of Canon CR2 (and other raws whose colour LightCraft fits from the camera's own JPEG, such as NEF and
+  ARW) gives the merged DNG the colour each photo has when opened alone (issue #965). An HDR merge of CR2s used to come
+  out green and dark.
+### "Rendering…" on the photo
+- The loupe says "Rendering…" at the bottom of the photo when what it shows isn't the finished photo yet: the
+  camera's embedded JPEG while a raw decodes, the previous render while an edit renders, or the magnified frame
+  while the 1:1 detail is on its way. It appears once that has lasted half a second, so quick renders never show it.
+- If LightCraft can't open a photo (its original is on a drive that isn't connected, or the file is damaged) but has
+  its embedded JPEG or a thumbnail to show, the loupe now says so at the bottom of the photo ("Original offline · no
+  smart preview" or "This photo can't be opened", the reason on hover) instead of showing that preview as if it were
+  the photo.
+### `--import <folder>` takes HEIC
+- `lightcraft-cli run --import <folder>` (and the MCP tools that take folders) now picks up HEIC, HEIF and Nikon NRW
+  files, the same files as `library.import` (issue #1080). They used to be skipped without a word.
+- Compare and Reference View panes say "Rendering…" (or that the photo can't be opened) the same way, so a
+  magnified preview isn't taken for the photo when checking focus at 1:1.
+
+### JPEG XL export
+- Export as JPEG XL (issue #247): Format ▸ JPEG XL in the Export dialog, `format: "jxl"` for agents and the CLI
+  (`render in.raw -o out.jxl`). Quality as for JPEG, or Lossless; Effort (Fast / Normal) trades time for a
+  smaller file; Progressive files show a coarse version first. 8- or 16-bit, sRGB, Display P3 or Rec. 2020 (lossless
+  files also Adobe RGB and ProPhoto), metadata as for JPEG. With HDR output, photos edited in HDR are written as
+  16-bit Rec. 2020 PQ. Not in the web version yet.
+- Lossy JPEG XL files in Display P3 or Rec. 2020 now open in their real colours; saturated colours used to come in
+  noticeably duller.
+
+### Open Library knows a Lightroom catalog
+- Choosing a Lightroom Classic catalog folder in File → Open Library… (or one of its `Previews.lrdata` /
+  `.lrcat-data` folders, or the `.lrcat`) no longer makes an empty LightCraft library inside it (issue #891). The
+  library open now stays, and LightCraft says "This is a Lightroom catalog, not a LightCraft library" and offers
+  **Import Lightroom Catalog…** with that catalog, or Cancel. `lightcraft-cli --library` refuses those folders too.
+
+### Canon EOS R5 Mark II
+- Canon EOS R5 Mark II C-RAW files that opened as "preview only" (more than half of them, depending on the
+  scene) now develop from their sensor data with every editing tool, like the camera's other raws. Photos
+  imported earlier switch over with Photo ▸ Reload from Disk.
+
+### Switching libraries
+- File ▸ New Library… asks for a name, then where to put it, and opens the new library (issue #902).
+- File ▸ Open Recent Library lists the last 8 libraries; ones that are gone (moved, drive disconnected) are greyed
+  out. Clear Recent Libraries empties the list.
+- The open library's name shows under My Photos at the top of the left panel and in the window title.
+- `lightcraft-cli --library` given a library's own file (`catalog.snap`) opens its folder instead of failing with
+  "File exists".
+- Agents use `app.newLibrary {path, name}`, `app.recentLibraries` and `app.clearRecentLibraries`.
+
+### Edit in PhotoCraft
+- Right-click a photo ▸ Edit In ▸ Edit in PhotoCraft (or Photo ▸ Edit In, ⇧⌘E) renders a copy with your edits, stacks it
+  with the original and opens it in PhotoCraft. LightCraft finds PhotoCraft where its installer put it (Windows,
+  macOS, Linux packages, AppImage, Flatpak), and says so if it isn't installed, before making a copy.
+- The copy is a 16-bit PSD by default, which PhotoCraft saves straight back to with File ▸ Save; when you come back to
+  LightCraft the copy shows what you saved.
+- Settings ▸ General ▸ External Editing: the format (PSD or TIFF), colour space and bit depth for PhotoCraft and for
+  the other editor (Edit in Other Editor, now ⌥⌘E), and where PhotoCraft is if you use a portable copy.
+- Export can write PSD too (flat, 8- or 16-bit).
+
+### Faster GPU exports
+- Exports with noise reduction, Texture, Clarity, Dehaze or Highlights and Shadows can be much faster on the GPU,
+  depending on the graphics card. On a Windows laptop with an AMD Radeon 780M, a full-size export of a 24 MP raw
+  with those edits went from about 3.7 s to 1.9 s. Photos look the same as before.
+
+### Reliability
+- Upgrading from a Windows installer older than 0.6 (such as 0.5.0) keeps LightCraft in the folder it was installed
+  in, instead of moving it back to Program Files (issue #399). If that folder has been deleted since, the upgrade
+  installs to Program Files.
+- A photo that runs into a bug in LightCraft while it renders (in a raw decoder or the editing pipeline) now fails
+  like a photo that can't be opened, with the reason, instead of rendering forever; its thumbnail stops waiting too.
+  Each such bug used to take one of the render threads with it, so after a few of them no photo rendered until
+  LightCraft was restarted. The bug is still written to the log (Help ▸ Open Log Folder) for a report.
+
+### Library sorting
+- Photos that tie on the sort key (equal ratings, one import batch, a burst shot within the same second) now sort by
+  file name, then id, instead of import order. Recently Added keeps a batch in file name order, and Auto-Stack orders a
+  burst by file name, so the first file is the cover.
+
+### Large preset collections
+- A library holding thousands of presets (a Lightroom collection imported whole: 11 000 presets, a 42 MB
+  presets.json) stays responsive. Every command used to re-serialize the whole list to see whether it had changed
+  (~0.6 s per slider tick); now the list is saved only after it changes, and a slider tick takes ~2 ms.
+- The Presets panel builds only the rows in view (and their thumbnails) instead of every preset on every frame; the
+  preset pickers in Import and Settings ▸ Import scroll the same way.
+- Importing a large collection and opening its library no longer compare every preset with every other.
+
 ## 2026-10-10
+
+### Dialogs fit the window
+- A dialog taller than the window no longer runs off it (issue #781): on a 1366×768 screen the Export dialog's title
+  and its Cancel / OK buttons were off screen, so it couldn't be confirmed. Now its options scroll and the title and
+  buttons stay visible. Long lists in dialogs (What's New, All Metadata, Keyboard Shortcuts) get shorter to fit.
+  Dialogs that fit look as before.
+
+### Previews match exports on Mac screens
+- On macOS, photos are shown through the profile of the screen the window is on while no monitor profile is chosen in
+  Settings ▸ Display (issue #787). On P3 screens previews used to look more saturated than the exported files in
+  Preview or Photos. Moving the window to another screen is followed; **Use Screen Profile** goes back to it after
+  choosing a profile file.
+
+### Sidebar sections
+- Arrange the left sidebar your way: drag Albums, Local, By Date, Folders or Keywords by its header to move it (a line
+  shows where it will go), or right-click a header for Move Up / Move Down.
+- Hide the sections you don't use: View ▸ Sidebar Sections, or right-click a header ▸ Hide This Section. Right-click
+  the My Photos title to bring one back, or choose Reset Sidebar Sections. The arrangement is remembered.
+- In a long section, the header stays at the top of the sidebar while you scroll through its rows, so you always see
+  which section you are in and can fold it from there.
+- Sections are easier to tell apart: a hairline between them, the fold chevron in the same column as the rows'
+  triangles, a highlight under the pointer. A folded section shows how many rows it holds, counts of 0 are fainter,
+  and a section with nothing in it says so instead of disappearing.
+- Recently Deleted is listed with All Photos, Recently Added and Picks under My Photos.
+- Keywords has a + in its header, like Albums: Create Keyword Tag without opening the Keyword List.
+- Agents: `view.sidebarSection`, `view.sidebarMoveSection`, `view.sidebarReset`; `ui.set` takes `sidebar`.
+
+### Kelvin white balance for raws whose camera has colour matrices
+- Raws from the 52 camera models whose colour matrices LightCraft has measured (Sony ILCE-7M3, ILCE-7M4, ILCE-7RM3,
+  Nikon D850, Canon EOS 5D Mark III and others) now show white balance in Kelvin, as a DNG does and as Lightroom
+  does: As Shot reads the file's white (an ILCE-7M3 sample: 4268 K / +7), the Temp slider runs 2000–50000 K and the
+  Daylight, Cloudy, Shade, Tungsten, Fluorescent and Flash presets set real temperatures (issue #730). The matrices
+  only convert between the camera's multipliers and Kelvin; the colour look is what it was.
+- Nothing already edited changes: a Custom white balance set on the old relative scale renders pixel for pixel as
+  before, and becomes the Kelvin value with the same look the next time it is edited. A photo imported earlier shows
+  its real As Shot temperature once the file is opened (or Reload reads it).
+- Lightroom's `crs:Temperature` for these raws is read as the Kelvin it is (sidecars, Lightroom catalogs, presets);
+  raws of other cameras keep the as-shot shift of issue #510. The two Kelvin scales come from different matrices and
+  differ by about 7–10 % on the ILCE-7M3; which one is off is still open.
+
+### Fujifilm lens corrections
+- Fujifilm RAFs from 59 camera models now get the lens correction the camera stores in the file: distortion (with the
+  camera's own zoom to fill the frame) and vignetting, as with Panasonic and Sony files. The Optics profile controls
+  adjust or switch them off, and DNG export keeps them. Lateral chromatic aberration data is not applied: our
+  demosaic already lines the colour planes up. Details and measurements: `docs/fuji-lens-corrections.md`.
+
+### Appearance
+- Settings ▸ Interface ▸ Appearance Mode: Sync with System, Dark Mode or Light Mode, above a light
+  and a dark theme card, each previewing its theme (dark: Charcoal, the look so far, or Midnight;
+  light: Silver or Paper). New and existing installs stay dark; following the system is opt-in.
+- The top bar's appearance button cycles Auto, Light, Dark (a monitor, sun or moon), and View ▸
+  Appearance lists the modes and themes. On Linux, Auto follows the desktop portal's colour scheme
+  as it changes, without polling.
+
+### Add to Apple Photos (macOS)
+- The Export dialog has **Add to Apple Photos**, with an optional album. The files are exported to your folder as
+  usual and then added to Photos, into a top-level album of that name (made when it's missing). The toast says how
+  many Photos added, or why it added none. Export with Previous and export presets repeat it.
+- The first time, macOS asks whether LightCraft may control Photos. Photos may ask about duplicates; files it skips
+  show as a partial import.
+- Agents: `app.export {addToPhotos, photosAlbum}`, `export.addToPhotos {paths}` for files already on disk, and
+  `export.photosImports`. See [Add to Apple Photos](apple-photos.md).
 
 ### Activity stack
 - Long-running tasks show in one place, top left under the top bar, as in Lightroom Classic (issue #345): imports and
@@ -11,7 +357,38 @@
 - Quitting while a task that can be stopped is running asks first ("Quit Anyway" stops it).
 - Agents list and stop tasks with `activity.list` and `activity.cancel`; `ui.inspect` reports them as `activity`.
 
+### Importing a deleted photo again
+- Importing a file whose photo is in Recently Deleted brings the photo back, with its edits, rating and albums
+  (issue #706; before, the import skipped it as "already in the library" while the grid showed it deleted). The
+  import review checks such files, marks them "Will be restored" and counts them as "in Recently Deleted"; the
+  choice next to that (Restore them / Import as new / Leave them) now starts on Restore. Files dropped on the window
+  restore the photo too and say "Restored 1 photo from Recently Deleted". A deleted photo whose file was moved is
+  relinked to the file it is imported from. Browsing a folder in Local, Auto Import and a Lightroom catalog import
+  never restore anything. Agents: `library.import` → `onDeleted` defaults to `restore` (`skip` keeps the old
+  behaviour, `fresh` imports a clean copy and deletes the old record).
+
+### Formats
+- File extensions match whatever their letter case: `IMG_0001.JPG` and `DSC_0002.NEF` as Nikon writes them, `.Jpg`
+  after a rename, an `.XMP` sidecar. Adding photos or a folder, Browse Folder (Local), drag-and-drop, the CLI and the
+  sidecar lookup always did; the Add Photos dialog on Linux did not until 0.5.0 (GTK and the desktop portal match
+  `*.jpg` case-sensitively, so `.JPG` and `.NEF` files were hidden — issues #342 and #705).
+
+### Reliability
+- Closing a library releases its lock explicitly (issue #680). On Linux and macOS the lock used to go with the file
+  handle, and a program being started by another thread at that moment held a copy of the handle until it was fully
+  launched, so reopening the library straight away could be refused with "This library is already open in another
+  LightCraft program" although nothing had it open. Nothing in the shipped app is known to hit the window today; it
+  made a lock test flaky, and the fix closes the window for good.
+
 ## 2026-10-09
+
+### HDR PNG export
+- With **HDR output** on, a photo edited in HDR can now be exported as a **16-bit PNG** with the PQ curve in Rec. 2020,
+  like the HDR AVIF: the same brightness, with SDR white at 203 cd/m², and content light levels recorded.
+- The colour is described by the PNG `cICP` chunk, not an ICC profile. HDR-aware viewers (current Chromium-based
+  browsers, for example) show it in HDR; **viewers that don't read `cICP` show the PQ values as if they were sRGB**,
+  so the picture looks flat and washed out there. That's how PQ PNG works, not a broken file: for a picture that
+  looks right everywhere, export a JPEG with HDR output on (an SDR image plus a gain map).
 
 ### Smart album rules
 - The rule editor's field menu is grouped: Rating, Pick Flag, Color Label and Any Searchable Text at the top, then
@@ -124,6 +501,13 @@
   colours are right on wide-gamut and calibrated displays instead of oversaturated. The Detail view renders straight
   into the display's own gamut; thumbnails and other previews are converted to it. Histograms, the preview caches
   and exports don't change. Agents use `app.displayProfile`. See [display profiles](display-profiles.md).
+
+### Highlights and Shadows (process 2)
+- Highlights and Shadows keep the fine detail of the tones they move (issue #632): pulling Highlights down on a bright
+  sky no longer flattens the twigs, lines and texture in it, and lifting Shadows keeps the texture of dark areas, much
+  as Exposure would; the edges between bright and dark regions stay as sharp as before. This is rendering process 2:
+  new photos (and Reset) get it, photos you already edited keep their look until you choose Photo ▸ Update to Current
+  Process. See [process versions](process-versions.md).
 
 ### Masking
 - Drag anywhere inside the selected radial gradient's ellipse to move it, including rotated
@@ -258,7 +642,7 @@
   12–32 mm kit zoom was off by about 5 % of the image width at the corners before. Files shot with the correction off
   are unchanged; photos imported before this change get it when imported again.
 - Canon CR3 raws now develop from their sensor data: lossless RAW and C-RAW, checked sample for sample on the EOS
-  M50, R100 and R8. CR3 files the decoder can't read yet still open from their embedded JPEG, as before.
+  M50, R100, R8 and RP (on the RP also in 1.6× crop mode). CR3 files the decoder can't read yet still open from their embedded JPEG, as before.
 - Canon EOS R7 C-RAW files develop from their sensor data too, instead of opening from their embedded JPEG. For R7
   C-RAWs imported earlier, Photo ▸ Reload from Disk picks up the raw data.
 - Canon CRW, Minolta MRW, Sigma X3F, Kodak KDC, Leaf MOS and Epson ERF files that LightCraft can't decode yet
@@ -287,6 +671,11 @@
   show no dialogs and take `INSTALLFOLDER=...`.
 - If the desktop app can't open its window (for example when no graphics device can be used), it now says so in a
   message box that names the log file, instead of quitting without a trace (issue #260).
+- On Linux and FreeBSD, file dialogs (Import Photos…, Open Library, Export, presets, keyword lists…) are children of
+  the LightCraft window. The xdg-desktop-portal picker used to open as a separate top-level window on Wayland
+  ("Failed to associate portal window with parent window" in the portal's log): tiling compositors put it beside the
+  app, and with LightCraft fullscreen it was hidden altogether, so Import Photos… looked like a hang until the
+  dialog was found and closed.
 - On macOS, single-key shortcuts that appear in the menu bar now work: E, C, H, M, ⇧P, I, K, D, ratings 0–5,
   labels 6–9, P / U and the rest did nothing, because macOS only passes ⌘ / ⌃ combinations and function keys
   to the menu bar and the app ignored those keys, assuming the menu bar would handle them. Keys outside the menus

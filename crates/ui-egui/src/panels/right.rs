@@ -114,9 +114,11 @@ fn custom_aspect(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label(crate::i18n::tr("Custom"));
         let a = ui.add(egui::TextEdit::singleline(&mut w).desired_width(34.0));
+        crate::widgets::screen_reader_name(ui.ctx(), a.id, crate::i18n::tr("Width"));
         register(ui.ctx(), "field:cropCustomW", a.rect);
         ui.label("×");
         let b = ui.add(egui::TextEdit::singleline(&mut h).desired_width(34.0));
+        crate::widgets::screen_reader_name(ui.ctx(), b.id, crate::i18n::tr("Height"));
         register(ui.ctx(), "field:cropCustomH", b.rect);
         let go = text_button(ui, "cropCustomApply", "Apply", false);
         apply = go.clicked() || ((a.lost_focus() || b.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)));
@@ -144,7 +146,7 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         });
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Aspect Ratio"));
-            let cur = aspect_label(d.crop.aspect, original);
+            let cur = aspect_label(app.crop_tool_aspect(), original);
             let t = Tokens::get(ui.ctx());
             let r = crate::widgets::dropdown(ui, "cropAspect", crate::i18n::tr(&cur), t.font(12.5), t.text);
 
@@ -157,7 +159,7 @@ fn crop(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                 ui.separator();
                 custom_aspect(app, ui);
             });
-            let locked = d.crop.aspect.is_some();
+            let locked = app.crop_tool_aspect().is_some();
             if text_button(ui, "cropLock", if locked { "Locked" } else { "Lock" }, locked).clicked() {
                 let _ = app.run("crop.aspect", json!({"aspect": "toggle"}));
             }
@@ -381,7 +383,7 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     header(ui, "Remove");
     padded(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for (label, tool) in [("Remove", "remove"), ("Heal", "heal"), ("Clone", "clone")] {
+            for (label, tool) in [("Remove", "remove"), ("Content-Aware", "fill"), ("Heal", "heal"), ("Clone", "clone")] {
                 if text_button(ui, &format!("removeMode-{tool}"), label, app.ui.tool == tool).clicked() {
                     app.ui.tool = tool.into();
                 }
@@ -403,7 +405,7 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     app.toast(
                         ui.ctx(),
                         if n == 0 {
-                            "No dust spots found".to_string()
+                            crate::i18n::tr("No dust spots found").to_string()
                         } else {
                             crate::i18n::tr_format!("Healed {n} dust spot{}", if n == 1 { "" } else { "s" }, n = n)
                         },
@@ -425,8 +427,9 @@ fn remove(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             lightcraft_develop::SpotMode::Heal => "Heal",
             lightcraft_develop::SpotMode::Clone => "Clone",
             lightcraft_develop::SpotMode::Remove => "Remove",
+            lightcraft_develop::SpotMode::Fill => "Content-Aware",
         };
-        super::edit::sub_title(ui, &crate::i18n::tr_format!("{mode} spot {} of {}", i + 1, d.spots.len(), mode = mode));
+        super::edit::sub_title(ui, &crate::i18n::tr_format!("{mode} spot {} of {}", i + 1, d.spots.len(), mode = crate::i18n::tr(mode)));
     }
     let plain = |id: &'static str, label: &'static str, min: f64, max: f64, default: f64| lightcraft_develop::ControlSpec {
         id,
@@ -696,6 +699,7 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         ui.label(egui::RichText::new("GPS").size(11.5).color(t.text_dim));
         let mut text: String = ui.data(|d| d.get_temp(gid)).unwrap_or_else(|| gps.clone());
         let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text(crate::i18n::tr("latitude, longitude")).desired_width(f32::INFINITY));
+        crate::widgets::screen_reader_name(ui.ctx(), r.id, "GPS");
         register(ui.ctx(), "field:gps", r.rect);
         if r.has_focus() {
             ui.data_mut(|d| d.insert_temp(gid, text.clone()));
@@ -722,6 +726,13 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
                     }
                 }
             });
+            if text_button(ui, "fillLocation", crate::i18n::tr("Fill Location"), false)
+                .on_hover_text(crate::i18n::tr("Fill empty City, State and Country from GPS (offline GeoNames place names)"))
+                .clicked()
+                && let Err(e) = app.run("metadata.reverseGeocode", json!({}))
+            {
+                app.toast_error(ui.ctx(), e);
+            }
         }
         if let Some(a) = p.analysis {
             let mut line = crate::i18n::tr_format!("Focus {:.0}", a.sharpness);
@@ -739,12 +750,11 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         if let lightcraft_catalog::Source::File { path } = &p.source {
             let avail = &app.session.media.availability;
             let online = !avail.is_offline(path);
-            let smart = app
-                .session
-                .media
-                .smart_dir
-                .as_ref()
-                .is_some_and(|d| avail.exists(&d.join(lightcraft_engine::smart::file_name(&p)).to_string_lossy()) == Some(true));
+            let smart = app.session.media.smart_dir.as_ref().is_some_and(|d| {
+                let shard = lightcraft_engine::smart::sharded_file_path(d, &p);
+                let legacy = d.join(lightcraft_engine::smart::file_name(&p));
+                avail.exists(&shard.to_string_lossy()) == Some(true) || avail.exists(&legacy.to_string_lossy()) == Some(true)
+            });
             if !online || smart {
                 let text = match (online, smart) {
                     (false, true) => "Original offline · editing the smart preview",
@@ -842,7 +852,7 @@ fn meta_field(app: &mut LightcraftApp, ui: &mut egui::Ui, label: &str, key: &str
     } else {
         crate::text_field::TextField::singleline(&widget, &mut text)
     };
-    let r = field.width(f32::INFINITY).show(ui);
+    let r = field.label(crate::i18n::tr(label)).width(f32::INFINITY).show(ui);
     // the typed text outlives frames while it is edited (the photo's value is drawn otherwise)
     if r.editing {
         ui.data_mut(|d| d.insert_temp(id, text.clone()));
@@ -1151,6 +1161,23 @@ fn short_time(iso: &str) -> String {
     }
 }
 
+/// How a History row is drawn: the step the settings are at is highlighted, the steps after it
+/// (still there to return to until a new edit) are greyed out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryRow {
+    Done,
+    Current,
+    Undone,
+}
+
+fn history_row(i: usize, cursor: Option<usize>) -> HistoryRow {
+    match cursor {
+        Some(c) if i == c => HistoryRow::Current,
+        Some(c) if i > c => HistoryRow::Undone,
+        _ => HistoryRow::Done,
+    }
+}
+
 fn activity(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     let Some(p) = app.session.catalog.photo(id).cloned() else { return };
     header(ui, "History");
@@ -1159,19 +1186,24 @@ fn activity(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         if p.history.is_empty() {
             ui.label(egui::RichText::new(crate::i18n::tr("No edits yet.")).color(t.text_dim));
         }
+        let cursor = p.history_index();
         for (i, h) in p.history.iter().enumerate().rev() {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
             register(ui.ctx(), format!("history:{i}"), r);
-            if resp.hovered() {
+            let row = history_row(i, cursor);
+            if row == HistoryRow::Current {
+                ui.painter().rect_filled(r, 3.0, t.pressed);
+            } else if resp.hovered() {
                 ui.painter().rect_filled(r, 3.0, t.hover);
             }
-            paint(ui.painter(), Rect::from_min_size(r.min + vec2(0.0, 4.0), vec2(16.0, 16.0)), Icon::Clock, t.icon);
+            let (icon, text) = if row == HistoryRow::Undone { (t.text_disabled, t.text_disabled) } else { (t.icon, t.text_label) };
+            paint(ui.painter(), Rect::from_min_size(r.min + vec2(0.0, 4.0), vec2(16.0, 16.0)), Icon::Clock, icon);
             ui.painter().text(
                 pos2(r.left() + 24.0, r.center().y),
                 Align2::LEFT_CENTER,
                 crate::i18n::history_label(&h.label, &app.session.presets),
                 t.font(12.5),
-                t.text_label,
+                text,
             );
             if resp.clicked() {
                 let _ = app.run("history.restore", json!({"index": i}));
@@ -1195,6 +1227,16 @@ fn activity(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
 
 #[cfg(test)]
 mod tests {
+    // Feature: the History panel greys out the steps after the cursor
+    #[test]
+    fn history_rows_after_the_cursor_are_greyed() {
+        use super::{HistoryRow, history_row};
+        let rows: Vec<_> = (0..4).map(|i| history_row(i, Some(1))).collect();
+        assert_eq!(rows, [HistoryRow::Done, HistoryRow::Current, HistoryRow::Undone, HistoryRow::Undone]);
+        assert_eq!(history_row(3, Some(3)), HistoryRow::Current, "at the latest step nothing is greyed");
+        assert_eq!(history_row(0, None), HistoryRow::Done);
+    }
+
     // Feature: the aspect button tells what is locked
     #[test]
     fn aspect_label_names_presets_in_either_orientation() {

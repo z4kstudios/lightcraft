@@ -9,6 +9,7 @@
 //! (`<2 hex>/<32 hex>.jpg` and the `<32 hex>.tmp…` temp files of [`DiskCache::put`], see
 //! [`is_cache_file`]): the directory may be shared with other files (e.g. a library opened on a
 //! photo folder that already has a `thumbs/` folder), and those are never touched (issue #98).
+//! A shard directory that is a symlink or junction is not followed (issue #1504).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -65,7 +66,7 @@ impl DiskCache {
 
     pub fn get(&self, key: Hash128) -> Option<Rgba8> {
         let p = self.path(key);
-        let Ok(bytes) = std::fs::read(&p) else {
+        let Some(bytes) = p.parent().filter(|d| is_real_dir(d)).and_then(|_| std::fs::read(&p).ok()) else {
             self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         };
@@ -91,23 +92,23 @@ impl DiskCache {
         let Some(bytes) = encode_jpeg(img) else { return };
         let p = self.path(key);
         let Some(parent) = p.parent() else { return };
-        if std::fs::create_dir_all(parent).is_err() {
+        if std::fs::create_dir_all(parent).is_err() || !is_real_dir(parent) {
             return;
         }
-        // know the current total before adding (the first scan must not count this file twice)
-        let _ = self.size();
+        // Serialize the file replacement and its size accounting. A repeated render of
+        // the same key replaces its JPEG; it must not count as another cache entry.
+        let mut total = self.total.lock().unwrap_or_else(|e| e.into_inner());
+        let used = total.get_or_insert_with(|| self.scan().iter().map(|f| f.1).sum());
+        let old_len = std::fs::metadata(&p).map_or(0, |m| m.len());
         let tmp = p.with_extension(format!("tmp{:?}", std::thread::current().id()).replace(['(', ')'], ""));
         if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, &p).is_err() {
             let _ = std::fs::remove_file(&tmp);
             return;
         }
         self.writes.fetch_add(1, Ordering::Relaxed);
-        let over = {
-            let mut t = self.total.lock().unwrap_or_else(|e| e.into_inner());
-            let total = t.get_or_insert(0);
-            *total += bytes.len() as u64;
-            *total > self.budget()
-        };
+        *used = used.saturating_sub(old_len).saturating_add(bytes.len() as u64);
+        let over = *used > self.budget();
+        drop(total);
         if over {
             self.prune();
         }
@@ -122,6 +123,10 @@ impl DiskCache {
             let sub_name = sub.file_name();
             let Some(sub_name) = sub_name.to_str() else { continue };
             if !is_shard_name(sub_name) {
+                continue;
+            }
+            // a shard that is a symlink (or junction) leads outside the cache: never walk it
+            if !is_real_dir(&sub.path()) {
                 continue;
             }
             let Ok(files) = std::fs::read_dir(sub.path()) else { continue };
@@ -171,6 +176,11 @@ impl DiskCache {
         }
         *self.total.lock().unwrap_or_else(|e| e.into_inner()) = Some(0);
     }
+}
+
+/// Whether `p` is a directory itself, not a symlink or Windows reparse point to one.
+fn is_real_dir(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
 }
 
 fn is_lower_hex(s: &str) -> bool {

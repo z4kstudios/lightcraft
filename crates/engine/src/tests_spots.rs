@@ -4,6 +4,23 @@ use serde_json::json;
 
 use crate::Session;
 
+/// `library.up` / `library.down` (#1171): move by the given number of photos, clamped at the ends.
+#[test]
+fn up_and_down_move_by_rows_and_stop_at_the_ends() {
+    let mut s = Session::with_demo();
+    let vis = s.visible_cloned();
+    assert!(vis.len() >= 6);
+    s.selection = crate::Selection::single(vis[0]);
+    s.execute("library.down", &json!({"rows": 4})).unwrap();
+    assert_eq!(s.selection.active, Some(vis[4]));
+    s.execute("library.up", &json!({})).unwrap();
+    assert_eq!(s.selection.active, Some(vis[3]), "default is one photo (the filmstrip)");
+    s.execute("library.up", &json!({"rows": 99})).unwrap();
+    assert_eq!(s.selection.active, Some(vis[0]), "clamped at the first photo");
+    s.execute("library.down", &json!({"rows": u64::MAX})).unwrap();
+    assert_eq!(s.selection.active, vis.last().copied(), "hostile counts clamp, never overflow");
+}
+
 fn spots(s: &Session) -> Vec<lightcraft_develop::Spot> {
     s.develop_of(s.active().unwrap()).unwrap().spots.clone()
 }
@@ -80,4 +97,14 @@ fn moving_an_ai_spot_does_not_keep_a_stale_fill() {
     s.set_develop(id, d, "fill").unwrap();
     s.execute("spot.update", &json!({"mode": "clone"})).unwrap();
     assert!(spots(&s)[0].fill.is_none());
+}
+
+#[test]
+fn a_content_aware_spot_has_no_source() {
+    let mut s = Session::with_demo();
+    s.execute("spot.add", &json!({"mode": "fill", "points": [[0.4, 0.5]], "size": 0.03})).unwrap();
+    let sp = &spots(&s)[0];
+    assert_eq!((sp.mode, sp.source_offset), (lightcraft_develop::SpotMode::Fill, None));
+    assert_eq!(serde_json::to_value(sp).unwrap()["mode"], "fill");
+    assert!(s.execute("spot.update", &json!({"mode": "nonsense"})).is_err());
 }

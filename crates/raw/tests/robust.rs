@@ -102,3 +102,68 @@ fn hostile_dimensions_are_rejected_quickly() {
     assert!(lightcraft_raw::decode(&bytes).is_err());
     assert!(t0.elapsed().as_secs_f64() < 2.0);
 }
+
+/// A Bayer DNG whose `BlackLevel` is a FLOAT holding NaN (or infinity), and a float CFA DNG with
+/// NaN samples: every normalised sample came out NaN, and AHD's green estimate clamped between two
+/// NaN neighbours, which panics (the 1:1 view and every export of such a file). Non-finite levels
+/// read as 0 and non-finite samples as black: the photo develops to finite numbers.
+#[test]
+fn non_finite_black_levels_and_samples_develop() {
+    use lightcraft_tiff::tags as t;
+    use lightcraft_tiff::{IfdBuilder, ImageData, TiffWriter, Value};
+    let (w, h) = (32u32, 16u32);
+    for black in [Value::Float(vec![f32::NAN]), Value::Double(vec![f64::INFINITY]), Value::Float(vec![64.0, f32::NAN, 64.0, 64.0])] {
+        let mut ifd = IfdBuilder::new();
+        ifd.set(t::DNG_VERSION, Value::Byte(vec![1, 4, 0, 0]));
+        ifd.set(t::NEW_SUBFILE_TYPE, Value::Long(vec![0]));
+        ifd.set(t::IMAGE_WIDTH, Value::Long(vec![w]));
+        ifd.set(t::IMAGE_LENGTH, Value::Long(vec![h]));
+        ifd.set(t::BITS_PER_SAMPLE, Value::Short(vec![16]));
+        ifd.set(t::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(t::PHOTOMETRIC, Value::Short(vec![t::photometric::CFA]));
+        ifd.set(t::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(t::CFA_PATTERN_EP, Value::Byte(vec![0, 1, 1, 2]));
+        ifd.set(t::BLACK_LEVEL_REPEAT_DIM, Value::Short(vec![2, 2]));
+        ifd.set(t::BLACK_LEVEL, black.clone());
+        ifd.set(t::WHITE_LEVEL, Value::Long(vec![4095]));
+        let strip: Vec<u8> = (0..w * h).flat_map(|i| (100 + (i * 37 % 3000) as u16).to_le_bytes()).collect();
+        ifd.set_image(ImageData::Strips { rows_per_strip: h, strips: vec![strip] });
+        let bytes = TiffWriter::default().write(&[ifd]).unwrap();
+        let img = lightcraft_raw::decode(&bytes).unwrap_or_else(|e| panic!("{black:?}: {e}"));
+        let rgb = img.develop(Method::Ahd).unwrap();
+        assert!(rgb.data.iter().flatten().all(|v| v.is_finite()), "{black:?}: finite output");
+        let _ = img.develop(Method::Ppg);
+    }
+    // float samples: a block of NaN and infinities in the middle of the mosaic
+    let (w, h) = (24usize, 16usize);
+    let data: Vec<f32> = (0..w * h)
+        .map(|i| match (i % w, i / w) {
+            (8..=13, 5..=10) => f32::NAN,
+            (2, _) => f32::INFINITY,
+            _ => (i * 97 % 1000) as f32 / 1000.0,
+        })
+        .collect();
+    let raw = RawImage {
+        format: RawFormat::Dng,
+        width: w,
+        height: h,
+        cpp: 1,
+        data: RawData::F32(data),
+        cfa: Some(Cfa::bayer("RGGB").unwrap()),
+        bits: 32,
+        black: BlackLevel::uniform(0.0),
+        white: vec![1.0],
+        active_area: Rect::new(0, 0, w, h),
+        crop: Rect::new(0, 0, w, h),
+        orientation: Orientation::Normal,
+        color: ColorData::default(),
+        wb_multipliers: None,
+        linearized: false,
+        opcodes: OpcodeLists::default(),
+        metadata: Default::default(),
+    };
+    for img in [raw.clone(), lightcraft_raw::decode(&lightcraft_raw::write_dng(&raw, &DngWriteOptions::default()).unwrap()).unwrap()] {
+        let rgb = img.develop(Method::Ahd).unwrap();
+        assert!(rgb.data.iter().flatten().all(|v| v.is_finite()), "float NaN samples: finite output");
+    }
+}

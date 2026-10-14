@@ -175,6 +175,19 @@ impl HeadlessView {
     }
 
     /// Every piece of text the last frame painted (labels, tooltips, values), in paint order.
+    /// Every shape of the last frame, with `Shape::Vec` flattened.
+    pub fn painted_shapes(&self) -> Vec<egui::epaint::Shape> {
+        fn flat(shape: &egui::epaint::Shape, out: &mut Vec<egui::epaint::Shape>) {
+            match shape {
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|shape| flat(shape, out)),
+                other => out.push(other.clone()),
+            }
+        }
+        let mut out = Vec::new();
+        self.shapes.iter().for_each(|s| flat(&s.shape, &mut out));
+        out
+    }
+
     pub fn painted_text(&self) -> Vec<String> {
         fn texts(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
             match shape {
@@ -232,6 +245,16 @@ pub struct Headless {
     pub window_commands: Vec<ViewportCommand>,
     /// The pointer cursor the last frame asked for (what a real host would show).
     pub last_cursor: egui::CursorIcon,
+}
+
+/// A headless run (`lightcraft-cli snapshot`, tests) is a one-shot process: however it ends, it
+/// first waits for an Apple Photos import its script left running (`export.addToPhotos {wait:
+/// false}`), bounded, so it never abandons osascript or the import's result.
+impl Drop for Headless {
+    fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.app.session.wait_for_photos_imports();
+    }
 }
 
 impl Headless {
@@ -427,6 +450,50 @@ impl Headless {
     }
 }
 
+/// For tests, a render offload: renders wait (stay queued) until `open` is set, then run; those
+/// whose slot `fails` picks come back failed, as an undecodable raw's would. Install it with
+/// `h.app.renderer.set_offload(Box::new(RenderGate::new(open.clone())))`.
+#[cfg(test)]
+pub(crate) struct RenderGate {
+    open: std::rc::Rc<std::cell::Cell<bool>>,
+    fails: fn(crate::render::Slot) -> bool,
+    jobs: Vec<(crate::render::Slot, lightcraft_engine::media::RenderJob)>,
+}
+
+#[cfg(test)]
+impl RenderGate {
+    pub(crate) fn new(open: std::rc::Rc<std::cell::Cell<bool>>) -> Self {
+        Self::failing(open, |_| false)
+    }
+    pub(crate) fn failing(open: std::rc::Rc<std::cell::Cell<bool>>, fails: fn(crate::render::Slot) -> bool) -> Self {
+        Self { open, fails, jobs: Vec::new() }
+    }
+}
+
+#[cfg(test)]
+impl crate::render::RenderOffload for RenderGate {
+    fn try_start(&mut self, slot: crate::render::Slot, job: lightcraft_engine::media::RenderJob) -> Option<lightcraft_engine::media::RenderJob> {
+        if !self.open.get() {
+            return Some(job);
+        }
+        self.jobs.push((slot, job));
+        None
+    }
+    fn finished(&mut self) -> Vec<(crate::render::Slot, lightcraft_engine::media::RenderResult, f64)> {
+        let fails = self.fails;
+        self.jobs
+            .drain(..)
+            .map(|(slot, job)| {
+                let mut r = job.run();
+                if fails(slot) {
+                    r.rendered = Err("no decoder for this raw".into());
+                }
+                (slot, r, 0.0)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -482,6 +549,45 @@ mod tests {
         h.step();
         h.step();
         assert!(!widgets(&mut h).contains("\"denoise:setup\""), "nothing is offered for a photo denoise does not apply to");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Install from file… with a model the engine rejects says why in the AI Denoise section (#1381), instead of
+    /// leaving the button looking dead.
+    #[test]
+    fn a_rejected_model_file_says_why_in_settings() {
+        use crate::state::Dialog;
+        let mut h = demo([1400.0, 900.0]);
+        let t = Duration::from_secs(10);
+        let dir = std::env::temp_dir().join(format!("lc-ui-denoise-rejected-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        h.app.session.set_denoise_models_dir(Some(dir.join("denoise-models")));
+        // without the runtime the button is disabled (the workspace build turns it on through the desktop app)
+        if h.app.session.execute("denoise.models.list", &json!({})).unwrap()["runtime"] != true {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // another app's model folder: the .onnx with that app's model.json, and no denoise-model.json
+        let onnx = dir.join("rawdenoise.onnx");
+        std::fs::write(&onnx, b"not a model").unwrap();
+        std::fs::write(dir.join("model.json"), br#"{"name": "rawdenoise", "scale": 2}"#).unwrap();
+        let picked = onnx.to_string_lossy().into_owned();
+        h.app.services.pick_denoise_model = Some(Box::new(move || vec![picked.clone()]));
+        h.app.ui.dialog = Some(Dialog::Settings { tab: "denoise".into() });
+        h.settle(SETTLE);
+        let r = h.request("ui.clickWidget", json!({"id": "denoise:installFile"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        h.step();
+        h.step();
+        assert_eq!(h.app.ui.dialog, Some(Dialog::Settings { tab: "denoise".into() }));
+        let painted = h.painted_text();
+        assert!(
+            painted
+                .iter()
+                .any(|s| s.starts_with("No denoise-model.json beside this .onnx file. The model.json there") && s.ends_with("(see docs/denoise.md)")),
+            "{painted:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -727,6 +833,51 @@ mod tests {
         assert!(egui::Popup::is_any_open(&h.view.ctx), "its context menu");
     }
 
+    /// #1171: Up / Down in the grid go to the cell above / below; in the filmstrip, one photo.
+    #[test]
+    fn up_and_down_move_through_the_grid_rows() {
+        let mut h = demo([1200.0, 760.0]);
+        let t = Duration::from_secs(10);
+        h.request("ui.set", json!({"view": "grid"}), t);
+        h.settle(SETTLE);
+        let first = h.app.session.visible_cloned()[0];
+        h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [first.0]}}), t);
+        h.settle(SETTLE);
+        let rect = |h: &Headless| {
+            let a = h.app.session.selection.active.unwrap();
+            h.app.widgets.iter().find(|(w, _)| *w == format!("thumb:{}", a.0)).map(|(_, r)| *r).expect("grid cell")
+        };
+        let top = rect(&h);
+        h.request("ui.key", json!({"key": "down"}), t);
+        h.settle(SETTLE);
+        let below = rect(&h);
+        let pos = {
+            let a = h.app.session.selection.active;
+            h.app.session.visible_cloned().iter().position(|x| Some(*x) == a)
+        }
+        .unwrap();
+        assert!(below.top() > top.bottom(), "the next row, at {pos}: {top:?} -> {below:?}");
+        assert!(below.left() < top.right() && below.right() > top.left(), "overlapping horizontally");
+        h.request("ui.key", json!({"key": "up"}), t);
+        h.settle(SETTLE);
+        assert_eq!(h.app.session.selection.active, Some(first), "back up");
+        h.request("ui.key", json!({"key": "up"}), t);
+        h.settle(SETTLE);
+        assert_eq!(h.app.session.selection.active, Some(first), "the top row stays put");
+        // the filmstrip (one row): Down is the next photo
+        h.request("ui.set", json!({"view": "detail"}), t);
+        h.settle(SETTLE);
+        h.request("ui.key", json!({"key": "down"}), t);
+        h.settle(SETTLE);
+        assert_eq!(
+            {
+                let a = h.app.session.selection.active;
+                h.app.session.visible_cloned().iter().position(|x| Some(*x) == a)
+            },
+            Some(1)
+        );
+    }
+
     /// The search field is a shared text field: right-click ▸ Paste puts the clipboard's text in
     /// and filters by it.
     #[test]
@@ -742,6 +893,28 @@ mod tests {
         }
         assert_eq!(h.app.ui.search, "wedding");
         assert_eq!(h.app.session.filter.text, "wedding", "and the library is filtered by it");
+    }
+
+    /// Issue #1648: clearing the filters from the loupe's pill empties the search field too, so
+    /// the field never shows a search that is no longer applied.
+    #[test]
+    fn clearing_the_loupe_filters_empties_the_search_field() {
+        let mut h = demo([1200.0, 760.0]);
+        let t = Duration::from_secs(10);
+        h.settle(SETTLE);
+        for (method, params) in [("ui.clickWidget", json!({"id": "field:search"})), ("ui.text", json!({"text": "a"}))] {
+            let r = h.request(method, params, t);
+            assert_eq!(r["ok"], true, "{r}");
+            h.settle(SETTLE);
+        }
+        assert_eq!(h.app.session.filter.text, "a", "filtered while typing");
+        assert!(!h.app.session.visible_cloned().is_empty(), "the search finds photos, so the loupe has one to show");
+        h.request("engine.execute", json!({"command": "view.detail"}), t);
+        h.settle(SETTLE);
+        let r = h.request("ui.clickWidget", json!({"id": "loupe:filters"}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+        assert_eq!((h.app.ui.search.as_str(), h.app.session.filter.text.as_str()), ("", ""));
     }
 
     /// Esc in the search field gives back the search from before the edit, and the filter with it.
@@ -1487,6 +1660,51 @@ mod tests {
         h.settle(SETTLE);
     }
 
+    /// A collection of thousands of presets (a Lightroom library imported whole) lists only the
+    /// rows in view: a few dozen widgets and thumbnails a frame, not one per preset (every frame
+    /// built all of them and froze the app for seconds); scrolling brings later rows in.
+    #[test]
+    fn presets_panel_with_thousands_of_presets_builds_only_visible_rows() {
+        let mut h = demo([1400.0, 900.0]);
+        let t = Duration::from_secs(10);
+        let many = (0..5000)
+            .map(|i| lightcraft_develop::Preset {
+                id: format!("user.big.{i}"),
+                name: format!("Look {i}"),
+                group: format!("Big {:02}", i / 500),
+                settings: json!({"light": {"exposure": (i % 20) as f64 / 10.0}}),
+                favorite: false,
+                builtin: false,
+            })
+            .collect();
+        assert_eq!(h.app.session.add_presets(many).len(), 5000);
+        h.request("ui.set", json!({"view": "detail"}), t);
+        h.request("engine.execute", json!({"command": "panel.presets"}), t);
+        h.app.ui.preset_thumbs = true;
+        h.settle(SETTLE);
+        h.step();
+        let rows = |h: &Headless| h.app.widgets.iter().filter(|(w, _)| w.starts_with("preset:")).map(|(w, _)| w.clone()).collect::<Vec<_>>();
+        let first = rows(&h);
+        assert!((5..60).contains(&first.len()), "{} rows built", first.len());
+        assert!(h.app.renderer.variant_textures() < 60, "{} thumbnails", h.app.renderer.variant_textures());
+        assert!(h.app.widgets.iter().any(|(w, _)| w == "presetGroup:Big 09"), "every group header is listed");
+        let started = std::time::Instant::now();
+        h.step();
+        eprintln!("presets panel frame with 5000 presets: {:?}", started.elapsed());
+        // scroll far down over the list: later presets come into view
+        let r = h.request("ui.hoverWidget", json!({"id": first[first.len() / 2]}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        for _ in 0..20 {
+            h.request("ui.scroll", json!({"dy": -2000}), t);
+            h.step();
+        }
+        h.step();
+        let later = rows(&h);
+        assert!((5..60).contains(&later.len()), "{} rows built", later.len());
+        let deep = later.iter().filter_map(|w| w.strip_prefix("preset:user.big.")).filter_map(|n| n.parse::<usize>().ok()).max();
+        assert!(deep.is_some_and(|n| n > 500), "scrolled rows: {later:?}");
+    }
+
     /// The filter bar drives `library.filter` and saves the view as a smart album.
     #[test]
     fn filter_bar_filters_and_saves_a_smart_album() {
@@ -1655,7 +1873,7 @@ mod tests {
             }
             assert_eq!(h.app.ui.dialog, None, "Return confirmed the dialog ({typed})");
         };
-        confirm(&mut h, Dialog::NewAlbum { name: String::new(), folder: false, parent: None }, "Weddings");
+        confirm(&mut h, Dialog::NewAlbum { name: String::new(), folder: false, parent: None, include_selected: true }, "Weddings");
         assert!(album(&h, "Weddings").is_some(), "New Album");
         confirm(&mut h, Dialog::RenameAlbum { id: garden, name: "Garden".into() }, "Flowers");
         assert_eq!(album(&h, "Flowers"), Some(garden), "Rename Album");
@@ -1762,6 +1980,29 @@ mod tests {
         assert!(w1 < 700.0, "{w1}");
     }
 
+    /// With a watermark on, the Export dialog shows the first photo with the watermark on it.
+    #[test]
+    fn export_dialog_previews_the_watermark() {
+        let mut h = demo([1400.0, 900.0]);
+        let t = Duration::from_secs(10);
+        h.request("engine.execute", json!({"command": "dialog.export", "params": {}}), t);
+        let preview = |h: &mut Headless| {
+            let r = h.request("ui.widgets", json!({}), t);
+            r["result"].as_array().and_then(|a| a.iter().find(|w| w["id"] == "image:exportWatermarkPreview")).map(|w| w["rect"].clone())
+        };
+        h.settle(SETTLE);
+        assert!(preview(&mut h).is_none(), "no preview without a watermark");
+        if let Some(crate::state::Dialog::Export { opts, .. }) = &mut h.app.ui.dialog {
+            opts.watermark = Some(lightcraft_engine::export::Watermark { text: "© LightCraft".into(), ..Default::default() });
+        }
+        let t0 = Instant::now();
+        while preview(&mut h).is_none() && t0.elapsed() < Duration::from_secs(30) {
+            h.step();
+        }
+        let rect = preview(&mut h).expect("the watermark preview is shown");
+        assert!(rect[2].as_f64().unwrap() > 50.0 && rect[3].as_f64().unwrap() > 50.0, "{rect}");
+    }
+
     #[test]
     fn export_dialog_runs_in_the_background() {
         let mut h = demo([1200.0, 900.0]);
@@ -1802,6 +2043,276 @@ mod tests {
         let last = after["export"]["last"].clone();
         assert_eq!(last["files"].as_array().map(Vec::len), Some(3), "{last}");
         assert!(last["files"][0]["width"].as_u64().is_some_and(|w| w <= 64));
+    }
+
+    /// Issue #236: the Export dialog's Add to Apple Photos is there on macOS only; there the
+    /// background export hands the files it wrote to Photos (a fake runner: tests never start
+    /// osascript or Photos) and the toast says how it went.
+    #[test]
+    fn export_dialog_adds_to_apple_photos_on_macos() {
+        let mut h = demo([1200.0, 1100.0]);
+        let t = Duration::from_secs(10);
+        let out = std::env::temp_dir().join(format!("lc-photos-dialog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        h.app.services.write_shared = Some(Arc::new(|p: &str, bytes: &[u8]| lightcraft_engine::export::write_file(p, bytes)));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let c = calls.clone();
+        h.app.session.apple_photos = Some(Arc::new(move |args: &[String], _| {
+            c.lock().unwrap().push(args.to_vec());
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "A/L0/001\nB/L0/001\n".into(), stderr: String::new() })
+        }));
+        let ids: Vec<u64> = h.app.session.visible_cloned().iter().take(2).map(|p| p.0).collect();
+        h.request("engine.execute", json!({"command": "library.select", "params": {"ids": ids}}), t);
+        h.request("engine.execute", json!({"command": "dialog.export", "params": {}}), t);
+        h.settle(SETTLE);
+        let shown = h.request("ui.widgets", json!({"filter": "exportAddToPhotos"}), t)["result"].as_array().map_or(0, Vec::len);
+        assert_eq!(shown > 0, cfg!(target_os = "macos"), "the option is offered where Photos is");
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        h.request("ui.clickWidget", json!({"id": "exportAddToPhotos"}), t);
+        h.settle(SETTLE);
+        if let Some(crate::state::Dialog::Export { opts, full_size, resize, dir, .. }) = &mut h.app.ui.dialog {
+            assert!(opts.add_to_photos, "the checkbox turns it on");
+            opts.photos_album = "Trip “2026”".into();
+            *full_size = false;
+            *resize = lightcraft_engine::export::Resize::long_edge(48);
+            *dir = out.to_string_lossy().into_owned();
+        }
+        let r = h.request("ui.dialog.confirm", json!({}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        let t0 = Instant::now();
+        while h.app.export.is_some() && t0.elapsed() < Duration::from_secs(60) {
+            h.step();
+        }
+        let last = h.request("ui.inspect", json!({}), t)["result"]["export"]["last"].clone();
+        let written: Vec<String> = last["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_string()).collect();
+        assert_eq!(written.len(), 2, "{last}");
+        assert_eq!(last["applePhotos"]["imported"], 2, "{last}");
+        assert_eq!(last["applePhotos"]["album"], "Trip “2026”");
+        let args = calls.lock().unwrap().clone();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0][args[0].len() - 2..], written[..], "the files written go to Photos");
+        let toast = h.app.ui.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+        assert!(toast.contains("2 added to Apple Photos album “Trip “2026””"), "{toast}");
+        // Export with Previous repeats it
+        assert_eq!(h.app.session.last_export.as_ref().unwrap()["addToPhotos"], true);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Codex review of #643: the progress line while Photos imports was translated on the export's
+    /// worker thread, whose language is always English.
+    #[test]
+    fn the_photos_progress_line_is_in_the_users_language() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let mut h = demo([1200.0, 900.0]);
+        let t = Duration::from_secs(10);
+        let out = std::env::temp_dir().join(format!("lc-photos-language-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        h.app.ui.language = crate::i18n::Locale::De;
+        crate::i18n::set_language(crate::i18n::Locale::De);
+        h.app.services.write_shared = Some(Arc::new(|p: &str, bytes: &[u8]| lightcraft_engine::export::write_file(p, bytes)));
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = std::sync::Mutex::new(held);
+        let (entered, photos_asked) = std::sync::mpsc::channel::<()>();
+        let entered = std::sync::Mutex::new(entered);
+        h.app.session.apple_photos = Some(Arc::new(move |_: &[String], _| {
+            let _ = entered.lock().unwrap().send(());
+            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(30));
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID\n".into(), stderr: String::new() })
+        }));
+        let ids: Vec<u64> = h.app.session.visible_cloned().iter().take(1).map(|p| p.0).collect();
+        let params = json!({"ids": ids, "dir": out, "longEdge": 48, "addToPhotos": true, "background": true});
+        let r = h.request("engine.execute", json!({"command": "app.export", "params": params}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        // Photos has been asked, and the window hasn't drawn a frame since (Codex review of #643):
+        // the export's row already has no ✕, and a cancel is refused rather than half-honoured
+        photos_asked.recv_timeout(Duration::from_secs(60)).expect("the export asks Photos");
+        let row = h.app.session.activity.list().into_iter().find(|r| r.kind == "export").expect("the export's row");
+        assert!(!row.cancellable, "{row:?}");
+        assert!(h.app.session.activity.cancel(row.id).is_err(), "Photos can't be stopped once asked");
+        let current = h.app.export.as_ref().map(|e| e.progress.lock().unwrap().1.clone()).unwrap_or_default();
+        assert_eq!(current, "Wird zu Apple Fotos hinzugefügt…");
+        // the row says so on the next frame (issue #345)
+        h.step();
+        let row = h.app.session.activity.list().into_iter().find(|r| r.kind == "export").expect("the export's row");
+        assert_eq!((row.detail.as_str(), row.cancellable), ("Wird zu Apple Fotos hinzugefügt…", false), "{row:?}");
+        release.send(()).unwrap();
+        let t0 = Instant::now();
+        while h.app.export.is_some() && t0.elapsed() < Duration::from_secs(90) {
+            h.step();
+        }
+        let last = h.app.last_export_result.clone().expect("the export reports");
+        assert_eq!((last["cancelled"].as_bool(), last["applePhotos"]["imported"].as_u64()), (Some(false), Some(1)), "{last}");
+        crate::i18n::set_language(crate::i18n::Locale::En);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Issue #236 review: control requests run on the UI thread, which must not wait minutes for
+    /// Photos. `export.addToPhotos` and `app.export {addToPhotos}` without `background` answer at
+    /// once with the running job; the app announces the outcome when Photos is done.
+    #[test]
+    fn a_slow_photos_import_never_blocks_the_window() {
+        let mut h = demo([1000.0, 700.0]);
+        let t = Duration::from_secs(30);
+        let out = std::env::temp_dir().join(format!("lc-photos-slow-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let file = out.join("a.jpg");
+        std::fs::write(&file, b"jpeg").unwrap();
+        h.app.services.write = Some(Box::new(|p: &str, bytes: &[u8]| lightcraft_engine::export::write_file(p, bytes)));
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        h.app.session.apple_photos_background = true; // as the desktop app sets it
+        h.app.session.apple_photos = Some(Arc::new(move |args: &[String], _| {
+            // a regression (Photos on the UI thread) fails the timing below instead of hanging
+            let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(20));
+            let n = args.len() - args.iter().position(|a| a == lightcraft_engine::apple_photos::MARKER).unwrap() - 2;
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID\n".repeat(n), stderr: String::new() })
+        }));
+        let t0 = Instant::now();
+        let r =
+            h.request("engine.execute", json!({"command": "export.addToPhotos", "params": {"paths": [file.to_string_lossy()], "album": "Slow"}}), t);
+        assert!(t0.elapsed() < Duration::from_secs(5), "answered at once: {r}");
+        assert_eq!(r["result"]["running"], true, "{r}");
+        go.send(()).unwrap();
+        while !h.app.ui.toast.as_ref().is_some_and(|t| t.0.contains("Apple Photos")) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "the outcome is announced");
+            h.step();
+        }
+        assert_eq!(h.app.ui.toast.as_ref().unwrap().0, "1 added to Apple Photos album “Slow”");
+        if cfg!(target_os = "macos") {
+            let t1 = Instant::now();
+            let p = json!({"dir": out.to_string_lossy(), "longEdge": 32, "addToPhotos": true});
+            let r = h.request("engine.execute", json!({"command": "app.export", "params": p}), t);
+            assert!(t1.elapsed() < Duration::from_secs(10), "the export answers without waiting for Photos: {r}");
+            assert_eq!(r["result"]["applePhotos"]["running"], true, "{r}");
+            assert_eq!(r["result"]["applePhotos"]["job"], 2, "{r}");
+            go.send(()).unwrap();
+            while !h.app.ui.toast.as_ref().is_some_and(|t| t.0.starts_with("1 added to Apple Photos") && !t.0.contains("Slow")) {
+                assert!(t1.elapsed() < Duration::from_secs(20), "the outcome is announced");
+                h.step();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Review of #236: a headless run (snapshot scripts) ending while an import it started with
+    /// `wait: false` is still running waits for it, on every exit path (dropping the `Headless`).
+    #[test]
+    fn a_headless_run_waits_for_its_photos_import_before_ending() {
+        let mut h = demo([800.0, 600.0]);
+        let t = Duration::from_secs(10);
+        let dir = std::env::temp_dir().join(format!("lc-photos-headless-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.jpg");
+        std::fs::write(&file, b"jpeg").unwrap();
+        let marker = dir.join("imported");
+        let m = marker.clone();
+        // Photos "imports" when `go` arrives (at most 20 s): released 0.8 s into the drop below
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        h.app.session.apple_photos = Some(Arc::new(move |_: &[String], _| {
+            let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(20));
+            std::fs::write(&m, b"done").unwrap();
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID\n".into(), stderr: String::new() })
+        }));
+        let r =
+            h.request("engine.execute", json!({"command": "export.addToPhotos", "params": {"paths": [file.to_string_lossy()], "wait": false}}), t);
+        assert_eq!(r["result"]["running"], true, "{r}");
+        assert!(!marker.exists(), "still importing");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            let _ = go.send(());
+        });
+        drop(h);
+        assert!(marker.exists(), "the import finished before the run ended");
+        release.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of #236: a snapshot that ends (an error in its script, say) while its background
+    /// export is still writing waits through the writing and then the import the export starts.
+    #[test]
+    fn a_headless_run_waits_for_its_exports_photos_import() {
+        if !cfg!(target_os = "macos") {
+            return; // addToPhotos is refused before exporting elsewhere
+        }
+        let mut h = demo([800.0, 600.0]);
+        let t = Duration::from_secs(10);
+        let dir = std::env::temp_dir().join(format!("lc-photos-headless-export-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let marker = dir.join("imported");
+        h.app.services.write_shared = Some(Arc::new(|p: &str, bytes: &[u8]| {
+            std::thread::sleep(Duration::from_millis(300)); // a slow disk: still writing at the drop
+            lightcraft_engine::export::write_file(p, bytes)
+        }));
+        let m = marker.clone();
+        h.app.session.apple_photos = Some(Arc::new(move |_: &[String], _| {
+            std::thread::sleep(Duration::from_millis(500));
+            std::fs::write(&m, b"done").unwrap();
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID\n".into(), stderr: String::new() })
+        }));
+        let p = json!({"dir": dir.join("out").to_string_lossy(), "longEdge": 32, "addToPhotos": true, "background": true});
+        let r = h.request("engine.execute", json!({"command": "app.export", "params": p}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(h.app.session.apple_photos_imports.running().is_some(), "reserved while writing");
+        drop(h);
+        assert!(marker.exists(), "the export's import finished before the run ended");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of #236: a background export adding to Photos holds the import from before it
+    /// writes. While its files are being written, `export.addToPhotos` is refused with the
+    /// export's job number; the export then adds its files under that job.
+    #[test]
+    fn a_background_export_holds_photos_while_it_writes() {
+        if !cfg!(target_os = "macos") {
+            return; // addToPhotos is refused before exporting elsewhere
+        }
+        let mut h = demo([1000.0, 700.0]);
+        let t = Duration::from_secs(10);
+        let out = std::env::temp_dir().join(format!("lc-photos-hold-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let other = out.join("other.jpg");
+        std::fs::write(&other, b"jpeg").unwrap();
+        // the writer waits for `go`: the export is still writing while we try another import
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        h.app.services.write_shared = Some(Arc::new(move |p: &str, bytes: &[u8]| {
+            let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(20));
+            lightcraft_engine::export::write_file(p, bytes)
+        }));
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let c = calls.clone();
+        h.app.session.apple_photos_background = true;
+        h.app.session.apple_photos = Some(Arc::new(move |args: &[String], _| {
+            c.lock().unwrap().push(args.to_vec());
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID\n".into(), stderr: String::new() })
+        }));
+        let p = json!({"dir": out.join("export").to_string_lossy(), "longEdge": 32, "addToPhotos": true, "photosAlbum": "Held", "background": true});
+        let r = h.request("engine.execute", json!({"command": "app.export", "params": p}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(h.app.export.is_some(), "writing in the background");
+        let r = h.request("engine.execute", json!({"command": "export.addToPhotos", "params": {"paths": [other.to_string_lossy()]}}), t);
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("An export is about to add its files to Apple Photos (import 1)"), "{r}");
+        go.send(()).unwrap();
+        let t0 = Instant::now();
+        while h.app.export.is_some() {
+            assert!(t0.elapsed() < Duration::from_secs(20), "the export finishes");
+            h.step();
+        }
+        let last = h.app.last_export_result.clone().unwrap();
+        assert_eq!((last["applePhotos"]["job"].as_u64(), last["applePhotos"]["imported"].as_u64()), (Some(1), Some(1)), "{last}");
+        let args = calls.lock().unwrap().clone();
+        assert_eq!(args.len(), 1, "only the export's files went to Photos");
+        assert!(args[0].last().unwrap().contains("export"), "{:?}", args[0].last());
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// Dragging grid photos onto an album row adds them to the album.
@@ -1879,6 +2390,49 @@ mod tests {
         h.app.ui.right = crate::state::RightPanel::Edit;
         h.settle(SETTLE);
         assert!(ids(&mut h, "notice:previewOnly:").is_empty());
+    }
+
+    #[test]
+    fn crop_default_browsing_is_read_only_and_drag_is_one_edit() {
+        let mut h = demo([1200.0, 800.0]);
+        let photos: Vec<_> = h.app.session.visible_cloned().into_iter().filter(|id| !h.app.session.catalog.photo(*id).unwrap().is_edited()).collect();
+        h.app.run("library.select", json!({"ids": [photos[0].0]})).unwrap();
+        h.app.ui.right = crate::state::RightPanel::Crop;
+        h.app.run("crop.aspect", json!({"aspect": "1x1"})).unwrap();
+        let saved = serde_json::to_value(&h.app.ui).unwrap();
+        for &photo in &photos[1..3] {
+            h.app.run("library.select", json!({"ids": [photo.0]})).unwrap();
+            let before = h.app.session.catalog.photo(photo).unwrap().clone();
+            let undo = h.app.session.undo.len();
+            h.settle(SETTLE);
+            let after = h.app.session.catalog.photo(photo).unwrap();
+            assert_eq!(after.develop, before.develop);
+            assert_eq!(after.history.len(), before.history.len());
+            assert!(!after.is_edited());
+            assert_eq!(h.app.session.undo.len(), undo);
+            assert_eq!(h.app.crop_tool_aspect(), Some((100, 100)));
+        }
+        let photo = photos[2];
+        let before = h.app.session.develop_of(photo).unwrap();
+        let undo = h.app.session.undo.len();
+        h.app.run("develop.beginInteraction", json!({"label": "Crop"})).unwrap();
+        h.app.begin_crop().unwrap();
+        h.app.run("crop.drag", json!({"handle": "bottomRight", "from": [0.8, 0.8], "to": [0.7, 0.7]})).unwrap();
+        h.app.run("develop.endInteraction", json!({})).unwrap();
+        assert_eq!(h.app.session.develop_of(photo).unwrap().crop.aspect, Some((100, 100)));
+        assert_eq!(h.app.session.undo.len(), undo + 1);
+        h.app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.app.session.develop_of(photo).unwrap(), before);
+        h.app.ui = serde_json::from_value(saved).unwrap();
+        assert_eq!(h.app.crop_tool_aspect(), Some((100, 100)));
+        h.app.run("crop.aspect", json!({"aspect": "toggle"})).unwrap();
+        assert_eq!(h.app.ui.crop_default_aspect, Some(json!("free")));
+        assert_eq!(h.app.session.develop_of(photo).unwrap(), before);
+        h.app.ui.crop_default_aspect = Some(json!("original"));
+        let p = h.app.session.catalog.photo(photo).unwrap();
+        assert_eq!(h.app.crop_tool_aspect(), Some((p.width * 100, p.height * 100)));
+        h.settle(SETTLE);
+        assert_eq!(h.app.session.develop_of(photo).unwrap(), before);
     }
 
     /// While cropping: O cycles the guides, ⇧O mirrors them, A locks / unlocks the aspect.
@@ -2223,6 +2777,50 @@ mod tests {
         h.request("ui.key", json!({"key": "Enter"}), t);
         assert!((exposure(&h) - 1.5).abs() < 1e-9, "{}", exposure(&h));
         assert_eq!(h.app.session.undo.len(), undo0 + 1);
+    }
+
+    /// Reset takes precedence over the value being typed when its button is clicked.
+    #[test]
+    fn reset_button_wins_over_an_active_numeric_draft() {
+        let mut h = demo([960.0, 600.0]);
+        let t = Duration::from_secs(10);
+        let ask = |h: &mut Headless, method: &str, params: serde_json::Value| {
+            let r = h.request(method, params, t);
+            assert_eq!(r["ok"], true, "{method}: {r}");
+            r["result"].clone()
+        };
+        ask(&mut h, "engine.execute", json!({"command": "app.gpu", "params": {"enabled": false}}));
+        ask(&mut h, "ui.set", json!({"settings": {"gpu": false, "previewEdge": 1280}, "presets": false}));
+        ask(&mut h, "engine.execute", json!({"command": "library.select", "params": {"ids": [1], "active": 1}}));
+        ask(
+            &mut h,
+            "ui.set",
+            json!({"view": "detail", "right": "edit", "leftPanel": false, "rightWidth": 330, "openSections": ["light"], "histogram": false}),
+        );
+        let active = h.app.session.active().unwrap();
+        for (text, terminal) in [("0.75", "Enter"), ("-1,5", "Escape")] {
+            ask(&mut h, "ui.clickWidget", json!({"id": "sliderValue:light.exposure"}));
+            ask(&mut h, "ui.text", json!({"text": text}));
+            ask(&mut h, "ui.key", json!({"key": terminal}));
+            let value = ask(&mut h, "engine.execute", json!({"command": "develop.get", "params": {}}));
+            assert_eq!(value["light"]["exposure"].as_f64(), Some(0.75), "{terminal}: {value}");
+        }
+        ask(&mut h, "ui.clickWidget", json!({"id": "sliderValue:light.exposure"}));
+        ask(&mut h, "ui.text", json!({"text": "2.0"}));
+        assert_eq!(h.view.ctx.memory(|m| m.focused()), Some(crate::text_field::id("sliderField:light.exposure")));
+        assert!(h.app.widgets.iter().any(|(id, _)| id == "sliderField:light.exposure"));
+        assert!(h.painted_text().iter().any(|text| text == "2.0"), "the replacement draft must be visible before Reset");
+        assert_eq!(h.app.session.develop_of(active).unwrap().light.exposure, 0.75, "the draft is not committed yet");
+        ask(&mut h, "ui.clickWidget", json!({"id": "button:reset"}));
+        let reset = ask(&mut h, "engine.execute", json!({"command": "develop.get", "params": {}}));
+        assert_eq!(
+            reset["light"]["exposure"].as_f64(),
+            Some(0.0),
+            "Reset must win over the active numeric draft: {reset}; history={:?}; last_inverse={:?}; focus={:?}",
+            h.app.session.undo.iter().map(|entry| entry.label.as_str()).collect::<Vec<_>>(),
+            h.app.session.undo.last().map(|entry| &entry.op),
+            h.view.ctx.memory(|m| m.focused()),
+        );
     }
 
     /// A slider's typed value is a shared text field: right-click ▸ Paste replaces the value
@@ -2605,9 +3203,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The import review offers what to do with files that are in Recently Deleted (issue #298):
-    /// they are unchecked until Restore or Import as new is chosen; then confirming restores the
-    /// photo (with its edits) or imports the file afresh.
+    /// The import review offers what to do with files that are in Recently Deleted (issues #298,
+    /// #706): they are checked, to be restored, by default; Leave them unchecks them; confirming
+    /// restores the photo (with its edits) or, with Import as new, imports the file afresh.
     #[test]
     fn import_review_offers_recently_deleted_files() {
         for (choice, tag) in [("restore", "r"), ("fresh", "f")] {
@@ -2634,9 +3232,12 @@ mod tests {
             h.request("engine.execute", json!({"command": "file.addPhotos", "params": {"paths": [dir.to_string_lossy()]}}), t);
             h.step_until(SETTLE, |h| matches!(h.app.ui.dialog, Some(crate::state::Dialog::Import { .. })));
             let Some(crate::state::Dialog::Import { opts }) = &mut h.app.ui.dialog else { panic!("no import review") };
-            assert_eq!(opts.selected_paths().len(), 1, "only the new file: the trashed one waits for a choice");
+            assert_eq!(opts.on_deleted, "restore", "the default brings a deleted photo back");
+            assert_eq!(opts.selected_paths().len(), 2, "the trashed file is checked from the start: it will be restored");
+            opts.set_on_deleted("");
+            assert_eq!(opts.selected_paths().len(), 1, "Leave them: only the new file");
             opts.set_on_deleted(choice);
-            assert_eq!(opts.selected_paths().len(), 2, "the trashed file is checked once a choice is made");
+            assert_eq!(opts.selected_paths().len(), 2, "the trashed file is checked again once a choice is made");
             // a per-cell choice survives switching between the two options, and "Leave them" unchecks
             let trashed = (0..opts.candidates.len()).find(|i| opts.is_trashed(*i)).unwrap();
             opts.checked[trashed] = false;
@@ -2668,6 +3269,70 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// With "Leave them", a file in Recently Deleted is left unchecked but a click on its checkbox
+    /// (or on its "In Recently Deleted" badge) still checks it, and importing it restores the
+    /// photo (issue #1285).
+    #[test]
+    fn import_review_checks_a_recently_deleted_file_by_hand() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-import-trash-click-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..2u8 {
+            let data: Vec<[u8; 4]> = (0..40 * 30).map(|k| [(k % 40 * 6) as u8, i * 90, 7, 255]).collect();
+            let img = lightcraft_raster::Rgba8 { width: 40, height: 30, data };
+            let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
+            std::fs::write(dir.join(format!("img{i}.png")), png).unwrap();
+        }
+        let services = crate::Services { png: None, ..Default::default() };
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), services);
+        app.ui.view = crate::state::ViewMode::PhotoGrid;
+        let mut h = Headless::new(app, [1300.0, 900.0], 1.0);
+        let t = Duration::from_secs(10);
+        let r = h.request("engine.execute", json!({"command": "library.import", "params": {"paths": [dir.join("img0.png").to_string_lossy()]}}), t);
+        let id = r["result"]["imported"][0].as_u64().unwrap();
+        h.request("engine.execute", json!({"command": "photo.rate", "params": {"ids": [id], "rating": 3}}), t);
+        h.request("engine.execute", json!({"command": "photo.delete", "params": {"ids": [id]}}), t);
+        h.request("engine.execute", json!({"command": "file.addPhotos", "params": {"paths": [dir.to_string_lossy()]}}), t);
+        h.step_until(SETTLE, |h| matches!(h.app.ui.dialog, Some(crate::state::Dialog::Import { .. })));
+        let Some(crate::state::Dialog::Import { opts }) = &mut h.app.ui.dialog else { panic!("no import review") };
+        let trashed = (0..opts.candidates.len()).find(|i| opts.is_trashed(*i)).expect("a file in Recently Deleted");
+        opts.set_on_deleted("");
+        h.settle(SETTLE);
+        let checked = |h: &Headless| matches!(&h.app.ui.dialog, Some(crate::state::Dialog::Import { opts }) if opts.checked[trashed]);
+        assert!(!checked(&h), "Leave them: unchecked");
+        let cell = |h: &mut Headless| {
+            let r = h.request("ui.widgets", json!({"filter": format!("import:{trashed}")}), t);
+            let w = r["result"].as_array().and_then(|a| a.iter().find(|w| w["id"] == format!("import:{trashed}"))).cloned().expect("cell on screen");
+            [0usize, 1, 2, 3].map(|i| w["rect"][i].as_f64().unwrap())
+        };
+        // the checkbox: 16 pt, 6 pt in from the cell's top-left corner
+        let [x, y, ..] = cell(&mut h);
+        h.request("ui.click", json!({"x": x + 14.0, "y": y + 14.0}), t);
+        h.settle(SETTLE);
+        assert!(checked(&h), "a click on the checkbox checks the file");
+        // the badges ("Will be restored" at the top right, "In Recently Deleted" under the
+        // checkbox) don't swallow the click either
+        let [x, y, w, _] = cell(&mut h);
+        h.request("ui.click", json!({"x": x + w - 14.0, "y": y + 12.0}), t);
+        h.settle(SETTLE);
+        assert!(!checked(&h), "a click on the badge unchecks it again");
+        h.request("ui.click", json!({"x": x + w - 14.0, "y": y + 34.0}), t);
+        h.settle(SETTLE);
+        assert!(checked(&h));
+        let r = h.request("ui.dialog.confirm", json!({}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        let t0 = std::time::Instant::now();
+        while h.app.import.is_some() && t0.elapsed() < Duration::from_secs(30) {
+            h.step();
+        }
+        assert!(h.app.import.is_none(), "finished");
+        let photos = &h.app.session.catalog;
+        assert!(photos.photo(lightcraft_catalog::PhotoId(id)).is_some_and(|p| !p.deleted && p.rating == 3), "restored with its edits");
+        assert_eq!(photos.photos().filter(|p| !p.deleted).count(), 2);
+        assert_eq!(photos.len(), 2, "restored, not imported a second time");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The import review opens bigger than the old fixed 6 × 2.5 grid and can be resized by its
@@ -2721,9 +3386,10 @@ mod tests {
         assert!(matches!(h.app.ui.dialog, Some(crate::state::Dialog::Import { .. })), "still open");
     }
 
-    /// Adding a file again that is in Recently Deleted shows it there (side panel opened, photo
-    /// selected) instead of only saying "duplicate skipped"; its menus offer Restore, and once
-    /// restored a re-add selects it in All Photos.
+    /// Adding a file again (dropped on the window, no review) whose photo is in Recently Deleted
+    /// brings the photo back, selected in All Photos, and says so (issue #706) — it is not
+    /// skipped as a duplicate; the trash view's menus offer Restore and Delete Permanently, and a
+    /// re-add of a photo that is in the library selects it in All Photos.
     #[test]
     fn readding_a_deleted_photo_shows_it_in_recently_deleted() {
         let dir = std::env::temp_dir().join(format!("lc-ui-readd-{}", std::process::id()));
@@ -2750,6 +3416,7 @@ mod tests {
         crate::import::start_paths(&mut h.app, paths.clone()).unwrap();
         h.settle(SETTLE);
         let id = h.app.session.selection.active.expect("imported photo selected");
+        let n0 = h.app.session.catalog.len();
         h.request("engine.execute", json!({"command": "photo.delete", "params": {"ids": [id.0]}}), t);
         assert!(h.app.session.catalog.photo(id).unwrap().deleted);
         let photo_items = |app: &LightcraftApp| -> Vec<String> {
@@ -2759,14 +3426,22 @@ mod tests {
         };
         assert!(!photo_items(&h.app).contains(&"photo.restore".to_string()), "Restore only for deleted photos");
 
-        h.app.ui.left_panel = false;
         crate::import::start_paths(&mut h.app, paths.clone()).unwrap();
         finish_import(&mut h);
-        assert_eq!(h.app.session.source, lightcraft_engine::LibrarySource::RecentlyDeleted);
-        assert_eq!(h.app.session.selection.ids, vec![id]);
-        assert!(h.app.ui.left_panel, "the side panel listing Recently Deleted is opened");
+        assert!(!h.app.session.catalog.photo(id).unwrap().deleted, "re-adding the file restores the photo");
+        assert_eq!(h.app.session.catalog.len(), n0, "no second record");
+        assert_eq!(h.app.session.source, lightcraft_engine::LibrarySource::All);
+        assert_eq!(h.app.session.selection.ids, vec![id], "the restored photo is selected");
         let toast = h.app.ui.toast.clone().expect("toast").0;
-        assert!(toast.contains("Recently Deleted") && toast.contains("Restore"), "{toast}");
+        assert!(toast.contains("Restored 1 photo from Recently Deleted"), "{toast}");
+        assert!(!photo_items(&h.app).contains(&"photo.restore".to_string()));
+        // undo of the re-add puts it back in Recently Deleted; the trash view's menus offer Restore
+        h.request("engine.execute", json!({"command": "edit.undo"}), t);
+        assert!(h.app.session.catalog.photo(id).unwrap().deleted, "one undo step");
+        h.request("engine.execute", json!({"command": "library.source", "params": {"kind": "recentlyDeleted"}}), t);
+        h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [id.0]}}), t);
+        h.settle(SETTLE);
+        assert_eq!(h.app.session.source, lightcraft_engine::LibrarySource::RecentlyDeleted);
         let items = photo_items(&h.app);
         assert!(items.contains(&"photo.restore".to_string()) && items.contains(&"photo.deletePermanently".to_string()), "{items:?}");
         assert!(!items.contains(&"photo.delete".to_string()), "{items:?}");
@@ -2802,6 +3477,40 @@ mod tests {
         let fresh = h.app.session.selection.active.expect("re-imported photo selected");
         assert_ne!(fresh, id);
         assert!(!h.app.session.catalog.photo(fresh).unwrap().deleted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Importing while an album is shown (issue #1446): the new photos aren't in it, so the view
+    /// switches to All Photos with the first of them active, instead of an active photo the grid
+    /// and the filmstrip don't show.
+    #[test]
+    fn an_import_from_an_album_view_shows_the_first_new_photo() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-import-show-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..3u8 {
+            let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[i * 40, 3, 9, 255]; 64] };
+            let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
+            std::fs::write(dir.join(format!("IMG_{i:02}.png")), png).unwrap();
+        }
+        let mut h = demo([1300.0, 900.0]);
+        let t = Duration::from_secs(10);
+        let album = h.app.session.catalog.albums().find(|a| !a.folder && !a.is_smart()).map(|a| a.id.0).expect("a demo album");
+        let r = h.request("engine.execute", json!({"command": "library.source", "params": {"kind": "album", "id": album}}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+        let before: Vec<lightcraft_catalog::PhotoId> = h.app.session.catalog.photos().map(|p| p.id).collect();
+        let r = h.request("engine.execute", json!({"command": "file.addPhotos", "params": {"paths": [dir.to_string_lossy()]}}), t);
+        assert_eq!(r["result"]["scanning"], true, "{r}");
+        h.step_until(SETTLE, |h| matches!(h.app.ui.dialog, Some(crate::state::Dialog::Import { .. })));
+        let r = h.request("ui.dialog.confirm", json!({}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+        assert!(h.app.import.is_none(), "finished");
+        let active = h.app.session.selection.active.expect("a photo is active");
+        assert!(!before.contains(&active), "the active photo is a new one: {active:?}");
+        assert_eq!(h.app.session.source, lightcraft_engine::LibrarySource::All);
+        assert!(h.app.session.visible_cloned().contains(&active), "the grid shows the active photo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2866,10 +3575,16 @@ mod tests {
         let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[40, 3, 9, 255]; 64] };
         let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
         std::fs::write(src.join("IMG_01.png"), png).unwrap();
+        // undated files are filed by the file's date (2026-01-14T05:58:48)
+        std::fs::File::options()
+            .write(true)
+            .open(src.join("IMG_01.png"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_768_370_328))
+            .unwrap();
         let dest_s = dest.to_string_lossy().to_string();
         let services = crate::Services { png: None, pick_folder: Some(Box::new(move || Some(dest_s.clone()))), ..Default::default() };
         let mut session = lightcraft_engine::Session::with_demo().with_fs();
-        // undated files are filed by the import time
         session.clock = Box::new(|| "2026-01-14T05:58:48".to_string());
         let mut app = LightcraftApp::new(session, services);
         app.ui.view = crate::state::ViewMode::PhotoGrid;
@@ -2919,6 +3634,12 @@ mod tests {
             let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[40 + i, 3, 9, 255]; 64] };
             let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
             std::fs::write(src.join(format!("IMG_0{i}.png")), png).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(src.join(format!("IMG_0{i}.png")))
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_768_370_328))
+                .unwrap();
         }
         let dest_s = dest.to_string_lossy().to_string();
         let services = crate::Services { png: None, pick_folder: Some(Box::new(move || Some(dest_s.clone()))), ..Default::default() };
@@ -3124,6 +3845,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// With no profile chosen, previews follow the profile of the screen showing the window (the
+    /// host's `screen_profile`: macOS doesn't colour-manage the window, issue #787), read again so
+    /// a move to another screen is followed. A chosen profile wins; choosing none goes back to the
+    /// screen's at once; a screen without a profile is sRGB.
+    #[test]
+    fn previews_follow_the_screen_profile_while_none_is_chosen() {
+        use lightcraft_codecs::{NamedSpace, icc::write_named};
+        use std::sync::{Arc, Mutex};
+        let id = |space| lightcraft_engine::display::Display::from_bytes("", &write_named(space)).unwrap().id();
+        let dir = std::env::temp_dir().join(format!("lightcraft-screen-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chosen = dir.join("prophoto.icc");
+        std::fs::write(&chosen, write_named(NamedSpace::ProPhoto)).unwrap();
+        let chosen = chosen.to_string_lossy().to_string();
+
+        let screen = Arc::new(Mutex::new(Some(write_named(NamedSpace::DisplayP3))));
+        let mut h = demo([1000.0, 700.0]);
+        let read = screen.clone();
+        h.app.services.screen_profile = Some(Box::new(move || read.lock().unwrap().clone()));
+        let t = Duration::from_secs(10);
+        h.step();
+        assert_eq!(h.app.renderer.display_id(), Some(id(NamedSpace::DisplayP3)), "the screen's profile");
+        let r = h.request("engine.execute", json!({"command": "app.displayProfile", "params": {}}), t);
+        assert_eq!((r["result"]["screen"].clone(), r["result"]["path"].clone()), (json!(true), Value::Null), "{r}");
+        assert!(h.app.ui.settings.display_profile.is_empty(), "nothing is saved as the setting");
+
+        // the window moves to another screen
+        *screen.lock().unwrap() = Some(write_named(NamedSpace::AdobeRgb));
+        assert!(h.step_until(SETTLE, |h| h.app.renderer.display_id() == Some(id(NamedSpace::AdobeRgb))));
+
+        // a chosen profile wins over the screen's
+        let r = h.request("engine.execute", json!({"command": "app.displayProfile", "params": {"path": chosen}}), t);
+        assert_eq!(r["ok"], true, "{r}");
+        *screen.lock().unwrap() = Some(write_named(NamedSpace::DisplayP3));
+        for _ in 0..90 {
+            h.step();
+        }
+        assert_eq!(h.app.renderer.display_id(), Some(id(NamedSpace::ProPhoto)));
+
+        // none chosen again: the screen's profile, at once
+        let r = h.request("engine.execute", json!({"command": "app.displayProfile", "params": {"path": null}}), t);
+        assert_eq!(r["result"]["screen"], true, "{r}");
+        assert_eq!(h.app.renderer.display_id(), Some(id(NamedSpace::DisplayP3)));
+
+        // a screen without a profile: sRGB
+        *screen.lock().unwrap() = None;
+        assert!(h.step_until(SETTLE, |h| h.app.renderer.display_id().is_none()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Settings (⌘,): tabs switch, app settings change the UI state, library settings go through
     /// the engine; the delete confirmation guards ⌫.
     #[test]
@@ -3138,17 +3909,31 @@ mod tests {
             assert_eq!(r["ok"], true, "{tab}: {r}");
             assert_eq!(h.app.ui.dialog, Some(crate::state::Dialog::Settings { tab: tab.into() }));
         }
-        // General: confirm before delete, startup view
+        // General: confirm before delete (on by default), startup view
+        assert!(h.app.ui.settings.confirm_delete);
+        h.request("ui.clickWidget", json!({"id": "check:settings.confirmDelete"}), t);
+        assert!(!h.app.ui.settings.confirm_delete);
         h.request("ui.clickWidget", json!({"id": "check:settings.confirmDelete"}), t);
         assert!(h.app.ui.settings.confirm_delete);
         h.request("ui.clickWidget", json!({"id": "button:settingsStartup-2"}), t);
         assert_eq!(h.app.ui.settings.startup_view, crate::state::StartupView::Detail);
         // Interface: filmstrip names off, grid badges always
         h.request("ui.clickWidget", json!({"id": "button:settingsTab-interface"}), t);
+        // Appearance cards (one row per theme, with its favorite star) sit above these controls;
+        // scroll the compact settings viewport past them.
+        h.request("ui.hoverWidget", json!({"id": "radio:theme-charcoal"}), t);
+        h.request("ui.scroll", json!({"dy": -700.0}), t);
+        for _ in 0..4 {
+            h.step();
+        }
         h.request("ui.clickWidget", json!({"id": "check:settings.filmNames"}), t);
         assert!(!h.app.ui.settings.film_names);
         h.request("ui.clickWidget", json!({"id": "button:settingsGridBadges-1"}), t);
         assert_eq!(h.app.ui.settings.grid_badges, crate::state::GridBadges::Always);
+        h.request("ui.scroll", json!({"dy": 700.0}), t);
+        for _ in 0..4 {
+            h.step();
+        }
         // Performance: the thumbnail cache size goes to the library preferences
         h.request("ui.clickWidget", json!({"id": "button:settingsTab-performance"}), t);
         h.request("ui.clickWidget", json!({"id": "button:settingsCache-0"}), t);
@@ -3486,6 +4271,82 @@ mod tests {
         h.request("engine.execute", json!({"command": "view.navigator"}), t);
         h.settle(SETTLE);
         assert!(!h.app.widgets.iter().any(|(w, _)| w == "canvas:navigator"), "toggled off");
+    }
+
+    /// While an edit renders, the loupe shows the last render: it says "Rendering…" once that has
+    /// lasted a moment (not at once after a spell away from the loupe, when no frames were drawn),
+    /// and stops when the render lands.
+    #[test]
+    fn the_loupe_says_rendering_while_an_edit_renders() {
+        use crate::render::Slot;
+        use std::{cell::Cell, rc::Rc};
+        let pill = |h: &Headless| h.app.widgets.iter().any(|(w, _)| w == "loupe:rendering");
+        let mut h = demo([1000.0, 700.0]);
+        let t = Duration::from_secs(10);
+        h.request("ui.set", json!({"view": "detail", "right": "none"}), t);
+        h.settle(SETTLE);
+        assert!(!pill(&h), "a finished render");
+        let open = Rc::new(Cell::new(false));
+        h.app.renderer.set_offload(Box::new(super::RenderGate::new(open.clone())));
+        // half a second in the grid: the loupe draws no frames
+        h.request("ui.set", json!({"view": "photoGrid"}), t);
+        for _ in 0..30 {
+            h.step();
+        }
+        h.request("engine.execute", json!({"command": "develop.set", "params": {"control": "light.exposure", "value": 0.5}}), t);
+        h.request("ui.set", json!({"view": "detail"}), t);
+        for _ in 0..12 {
+            h.step();
+        }
+        assert!(h.app.renderer.is_pending(Slot::Main), "the edit's render is held");
+        assert!(!pill(&h), "not at once");
+        for _ in 0..30 {
+            h.step();
+        }
+        assert!(pill(&h), "the last render is on screen and the edit's is on its way");
+        open.set(true);
+        assert!(h.step_until(SETTLE, |h| !pill(h)), "gone once the render lands");
+        assert!(!h.app.renderer.is_pending(Slot::Main));
+    }
+
+    /// A render that fails while the loupe shows a stand-in (the embedded JPEG, a thumbnail) left
+    /// the stand-in up as if it were the photo: the loupe says the photo can't be opened, with the
+    /// error on hover, and keeps saying so while a library change retries it.
+    #[test]
+    fn the_loupe_says_so_when_the_render_behind_a_stand_in_fails() {
+        use crate::render::Slot;
+        use std::{cell::Cell, rc::Rc};
+        let has = |h: &Headless, id: &str| h.app.widgets.iter().any(|(w, _)| w == id);
+        let mut h = demo([1000.0, 700.0]);
+        let t = Duration::from_secs(10);
+        h.request("ui.set", json!({"view": "detail", "right": "none"}), t);
+        h.settle(SETTLE);
+        assert!(!has(&h, "loupe:renderFailed"));
+        let first = h.app.session.active().expect("a photo is open").0;
+        // every loupe render fails, as an undecodable raw's would; the rest render
+        let open = Rc::new(Cell::new(true));
+        h.app.renderer.set_offload(Box::new(super::RenderGate::failing(open.clone(), |s| s == Slot::Main)));
+        let other = h.app.session.visible_cloned().get(1).copied().expect("a second photo").0;
+        h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [other], "active": other}}), t);
+        assert!(h.step_until(SETTLE, |h| has(h, "loupe:renderFailed")), "the failure is said");
+        let shown = h.app.loupe_shown.map(|l| l.1);
+        assert!(!matches!(shown, Some("render" | "none")), "over a stand-in: {shown:?}");
+        assert!(!has(&h, "loupe:rendering"));
+        let r = h.request("ui.inspect", json!({}), t);
+        assert_eq!(r["result"]["loupe"]["failed"], "no decoder for this raw", "{}", r["result"]["loupe"]);
+        // a library change (here a rating) retries it: the failure stays said, no "Rendering…"
+        open.set(false);
+        h.request("engine.execute", json!({"command": "photo.rate", "params": {"rating": 2}}), t);
+        for _ in 0..45 {
+            h.step();
+        }
+        assert!(h.app.renderer.is_pending(Slot::Main), "the retry is held");
+        assert!(has(&h, "loupe:renderFailed") && !has(&h, "loupe:rendering"), "no blink while it retries");
+        // back on a photo that rendered: nothing to say
+        open.set(true);
+        h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [first], "active": first}}), t);
+        h.app.renderer.set_offload(Box::new(super::RenderGate::new(open.clone())));
+        assert!(h.step_until(SETTLE, |h| h.app.loupe_shown.is_some_and(|l| l.1 == "render") && !has(h, "loupe:renderFailed")));
     }
 
     #[test]

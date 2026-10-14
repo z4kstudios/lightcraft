@@ -34,25 +34,31 @@ pub mod gaintable;
 pub mod highlight;
 #[cfg(feature = "jxl")]
 mod jxl;
+pub mod kelvin_presets;
 pub mod ljpeg;
+pub(crate) mod llvc;
 pub mod opcodes;
 mod preview;
 pub mod profile;
 mod saturation;
 pub mod semantic;
+pub mod sparse;
 pub mod spectral;
 mod tiffraw;
 mod unpack;
 mod vendor;
 
 pub use demosaic::{Method, demosaic};
-pub use dngwrite::{DngCompression, DngWriteOptions, write_dng};
+pub use dngwrite::{DngCompression, DngWriteOptions, write_dng, write_rendered_dng};
 pub use lightcraft_color::Mat3;
 pub use lightcraft_geom::Orientation;
 pub use lightcraft_meta::Metadata;
 pub use lightcraft_raster::Rgb32f;
 pub use opcodes::{Opcode, OpcodeLists};
-pub use preview::{PreviewColorSpace, embedded_preview, embedded_preview_color_space, embedded_preview_dynamic_range_optimized};
+pub use preview::{
+    PREVIEW_PREFIX, PreviewColorSpace, PreviewRange, bounded_preview, embedded_preview, embedded_preview_color_space, embedded_preview_covering,
+    embedded_preview_dynamic_range_optimized, embedded_preview_from_range,
+};
 pub use semantic::{SemanticMask, semantic_masks};
 
 use lightcraft_color::Xy;
@@ -103,6 +109,8 @@ pub enum RawFormat {
     /// full-resolution CFA image with black/white levels, a default crop and `AsShotNeutral`):
     /// Hasselblad 3FR and FFF. Read by the DNG reader.
     CfaTiff,
+    /// Kodak DCS520C TIFF: a two-component lossless JPEG CFA sub-IFD with a response curve (`vendor::kodak`).
+    KodakDcs,
     /// Another TIFF-based raw (3FR, IIQ, ERF, KDC, DCR, MOS, …).
     OtherTiff,
 }
@@ -123,6 +131,7 @@ impl RawFormat {
                 | RawFormat::Pef
                 | RawFormat::CfaTiff
                 | RawFormat::Srw
+                | RawFormat::KodakDcs
         )
     }
 }
@@ -181,7 +190,10 @@ pub fn probe(bytes: &[u8]) -> Option<RawFormat> {
     if make.starts_with("NIKON") && has_cfa {
         return Some(if t.all_ifds().len() > 1 { RawFormat::Nef } else { RawFormat::Nrw });
     }
-    if make.starts_with("SONY") && sony_raw {
+    // Hasselblad's Sony-built bodies (the Lunar is a NEX-7 inside) write a Sony ARW under their own Make. Sony's
+    // raw coding gives them away: compression 32767 or the raw IFD's tone-curve tag 0x7010, which no 3FR / FFF has
+    let sony_coded = || t.all_ifds().iter().any(|i| i.u16(lightcraft_tiff::tags::COMPRESSION) == Some(32767) || i.contains(0x7010));
+    if (make.starts_with("SONY") && sony_raw) || (make.starts_with("HASSELBLAD") && sony_coded()) {
         return Some(RawFormat::Arw);
     }
     if (make.starts_with("PENTAX") || make.starts_with("RICOH")) && pentax_raw {
@@ -194,13 +206,27 @@ pub fn probe(bytes: &[u8]) -> Option<RawFormat> {
     if make.starts_with("SAMSUNG") && samsung_raw {
         return Some(RawFormat::Srw);
     }
+    if vendor::kodak::raw_ifd(&t, bytes).is_some() {
+        return Some(RawFormat::KodakDcs);
+    }
     if dng::is_plain_cfa_tiff(&t, bytes) {
         return Some(RawFormat::CfaTiff);
     }
-    if has_cfa || thumbnail_shell(&t, bytes.len()).is_some() || is_preview_container(ifd0) {
+    if has_cfa || thumbnail_shell(&t, bytes.len()).is_some() || is_preview_container(ifd0) || is_leaf_mosaic(ifd0) {
         return Some(RawFormat::OtherTiff);
     }
     None
+}
+
+/// Leaf's private data block in IFD0, tag `0x8606` (`LeafData` in the ExifTool EXIF tag-name documentation, which
+/// says the Leaf tags "are found in .MOS images from Leaf digital camera backs").
+const LEAF_DATA: u16 = 0x8606;
+
+/// An uncompressed Leaf MOS: IFD0 is the 16-bit mosaic itself (compression 1, BlackIsZero, one sample per pixel),
+/// with no Make tag and no CFA photometric, so only Leaf's data block marks it as a raw (issue #1275). A rendered
+/// RGB image that kept the block stays an ordinary image.
+fn is_leaf_mosaic(ifd0: &lightcraft_tiff::Ifd) -> bool {
+    ifd0.contains(LEAF_DATA) && ifd0.u16(lightcraft_tiff::tags::SAMPLES_PER_PIXEL).unwrap_or(1) == 1
 }
 
 /// Whether the Exif maker note starts with the signature of the Pentax layouts (`AOC\0` or `PENTAX \0`).
@@ -324,10 +350,13 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
 /// [`RawImage::info`] of the decoded image. Black and white levels are not included (some formats
 /// measure them from the samples).
 ///
-/// A few uncompressed vendor formats derive part of this from the samples themselves (Nikon
-/// NEF: optically masked trailing columns; Olympus ORF: the bit depth of 16-bit files, and the CFA
-/// phase of files without an Exif `CFAPattern`; Pentax PEF without crop tags: dark borders); for
-/// those the samples are read (unpacked, nothing to decompress) and dropped.
+/// A few vendor formats derive part of this from the samples themselves (Nikon NEF: optically
+/// masked trailing columns; Olympus ORF: the bit depth of 16-bit files, and the CFA phase of files
+/// without an Exif `CFAPattern`; Pentax PEF without crop tags: dark borders). Those read the
+/// samples they need and drop them: ORF and PEF unpack their uncompressed data; NEF reads only the
+/// first 128 rows (`vendor::nef::MASK_ROWS`), which both the probe and the full decode judge the masked
+/// columns from, so a compressed NEF probes in a few milliseconds instead of decoding its whole
+/// Huffman stream (issue #708).
 pub fn probe_info(bytes: &[u8]) -> Result<RawInfo> {
     decode_with(bytes, Mode::Header).map(RawImage::into_info)
 }
@@ -347,7 +376,7 @@ fn decode_with(bytes: &[u8], mode: Mode) -> Result<RawImage> {
         RawFormat::Dng => dng::decode(bytes, mode).map(lift_clipped),
         RawFormat::Cr2 => vendor::cr2::decode(bytes, mode),
         RawFormat::Cr3 => vendor::cr3::decode(bytes, mode),
-        RawFormat::Nef | RawFormat::Nrw => vendor::nef::decode(bytes),
+        RawFormat::Nef | RawFormat::Nrw => vendor::nef::decode(bytes, mode),
         RawFormat::Arw => vendor::arw::decode(bytes, mode),
         RawFormat::Raf => vendor::raf::decode(bytes, mode),
         RawFormat::Rw2 => vendor::rw2::decode(bytes, mode),
@@ -355,6 +384,7 @@ fn decode_with(bytes: &[u8], mode: Mode) -> Result<RawImage> {
         RawFormat::Orf => vendor::orf::decode(bytes, mode),
         RawFormat::CfaTiff => dng::decode_as(bytes, mode, RawFormat::CfaTiff).map(lift_clipped),
         RawFormat::Srw => vendor::srw::decode(bytes, mode),
+        RawFormat::KodakDcs => vendor::kodak::decode(bytes, mode),
         RawFormat::OtherTiff => Err(RawError::Unsupported(other_tiff_reason(bytes))),
         other => Err(RawError::Unsupported(format!("{other:?} files are not decoded yet"))),
     }
@@ -583,6 +613,10 @@ pub struct ColorData {
     /// "Camera local tone mapping" option asks for it (`lightcraft_pipeline::local_tone`).
     #[serde(default)]
     pub profile: profile::ProfileLook,
+    /// The camera's white-balance presets at stated temperatures (Sony ARW), which give a raw without colour
+    /// matrices a Kelvin scale ([`kelvin_presets`]). Not a DNG tag: nothing else reads it.
+    #[serde(default)]
+    pub kelvin_presets: Option<kelvin_presets::KelvinPresets>,
 }
 
 /// A decoded raw image.
@@ -681,6 +715,10 @@ impl RawImage {
         if self.width == 0 || self.height == 0 || !(1..=4).contains(&self.cpp) {
             return Err(RawError::Corrupt("bad dimensions".into()));
         }
+        // two samples a pixel are neither one colour nor RGB: nothing downstream can develop them (issue #1511)
+        if self.cpp == 2 {
+            return Err(RawError::Unsupported("2 samples per pixel".into()));
+        }
         if samples && self.data.len() != self.width * self.height * self.cpp {
             return Err(RawError::Corrupt("data length mismatch".into()));
         }
@@ -734,7 +772,10 @@ impl RawImage {
                 for s in 0..cpp {
                     let v = src(base + x * cpp + s);
                     let b = self.black.at(x, y, s, cpp);
-                    row[x * cpp + s] = (v - b) * scale[s];
+                    // a NaN or infinite sample (a float DNG's, or a black level a file got wrong)
+                    // reads as black, so the demosaic and every stage after it see numbers
+                    let n = (v - b) * scale[s];
+                    row[x * cpp + s] = if n.is_finite() { n } else { 0.0 };
                 }
             }
         });
@@ -1049,6 +1090,66 @@ mod tests {
         let mut ifd = rgb_ifd(16, 12);
         ifd.set(t::COMPRESSION, Value::Short(vec![99]));
         assert_eq!(probe(&write(&[ifd])), Some(RawFormat::OtherTiff));
+    }
+
+    /// Issue #1275: an uncompressed Leaf MOS (Aptus 22) is a full-size 16-bit grey IFD0 with no Make tag; only Leaf's
+    /// data block (`0x8606`) says it is a raw. It must not import as a greyscale image of its mosaic. The same IFD
+    /// without the block, or an RGB image carrying it, stays an ordinary image.
+    #[test]
+    fn uncompressed_leaf_mos_is_a_raw() {
+        let mosaic = |leaf_data: bool| {
+            let mut ifd = IfdBuilder::new();
+            ifd.set(t::NEW_SUBFILE_TYPE, Value::Long(vec![0]));
+            ifd.set(t::IMAGE_WIDTH, Value::Long(vec![16]));
+            ifd.set(t::IMAGE_LENGTH, Value::Long(vec![12]));
+            ifd.set(t::BITS_PER_SAMPLE, Value::Short(vec![16]));
+            ifd.set(t::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+            ifd.set(t::PHOTOMETRIC, Value::Short(vec![t::photometric::BLACK_IS_ZERO]));
+            ifd.set(t::COMPRESSION, Value::Short(vec![1]));
+            ifd.set_image(ImageData::Tiles { tile_width: 16, tile_height: 12, tiles: vec![vec![0x40; 16 * 12 * 2]] });
+            if leaf_data {
+                ifd.set(LEAF_DATA, Value::Undefined(b"PKTS\0\0\0\x01".to_vec()));
+            }
+            ifd
+        };
+        let bytes = TiffWriter::new(lightcraft_tiff::ByteOrder::Big, false).write(&[mosaic(true)]).unwrap();
+        assert_eq!(probe(&bytes), Some(RawFormat::OtherTiff));
+        assert!(matches!(decode(&bytes), Err(RawError::Unsupported(_))));
+        assert!(matches!(probe_info(&bytes), Err(RawError::Unsupported(_))));
+        assert_eq!(probe(&write(&[mosaic(false)])), None, "a 16-bit grey TIFF");
+        let mut rgb = rgb_ifd(16, 12);
+        rgb.set(LEAF_DATA, Value::Undefined(b"PKTS\0\0\0\x01".to_vec()));
+        assert_eq!(probe(&write(&[rgb])), None, "a rendered RGB image that kept the block");
+    }
+
+    /// Issue #1275: a Hasselblad Lunar is a Sony NEX-7 ARW under Make HASSELBLAD. Sony's raw coding (compression 32767
+    /// or the tone-curve tag `0x7010`) sends it to the ARW reader; a Hasselblad file without it does not go there.
+    #[test]
+    fn hasselblad_make_with_sony_raw_coding_is_arw() {
+        let file = |make: &str, compression: u16, tone_curve: bool| {
+            let mut raw = IfdBuilder::new();
+            raw.set(t::IMAGE_WIDTH, Value::Long(vec![64]));
+            raw.set(t::IMAGE_LENGTH, Value::Long(vec![2]));
+            raw.set(t::BITS_PER_SAMPLE, Value::Short(vec![12]));
+            raw.set(t::COMPRESSION, Value::Short(vec![compression]));
+            raw.set(t::PHOTOMETRIC, Value::Short(vec![t::photometric::CFA]));
+            if tone_curve {
+                raw.set(0x7010, Value::Short(vec![8000, 10400, 12900, 14100]));
+            }
+            raw.set_image(ImageData::Strips { rows_per_strip: 2, strips: vec![vec![0; 128]] });
+            let mut ifd0 = rgb_ifd(4, 3);
+            ifd0.set(t::MAKE, Value::Ascii(make.into()));
+            ifd0.set(t::MODEL, Value::Ascii("Lunar".into()));
+            ifd0.add_sub_ifd(raw);
+            write(&[ifd0])
+        };
+        assert_eq!(probe(&file("HASSELBLAD", 32767, false)), Some(RawFormat::Arw));
+        assert_eq!(probe(&file("Hasselblad", 1, true)), Some(RawFormat::Arw));
+        let lunar = decode(&file("HASSELBLAD", 32767, true)).unwrap();
+        assert_eq!((lunar.format, lunar.width, lunar.height, lunar.bits), (RawFormat::Arw, 64, 2, 14));
+        // a Hasselblad CFA image in another coding is not an ARW
+        assert_ne!(probe(&file("HASSELBLAD", 1, false)), Some(RawFormat::Arw));
+        assert_ne!(probe(&file("HASSELBLAD", 7, false)), Some(RawFormat::Arw));
     }
 
     // --- TIFF raws that describe their raw IFD the way DNG does but carry no DNG version tag ---

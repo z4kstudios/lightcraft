@@ -5,6 +5,14 @@ The CR3 adapter reads the CRX Bayer track, `CMP1` compression descriptor,
 black/white levels and the default crop come from the file. A Dual Pixel delta
 track is never substituted for the primary Bayer track.
 
+The EOS R6 Mark III writes `ColorData` version 66, which keeps version 64's as-shot white balance (word 105) and
+black level (word 383) offsets. Measured on 33 files from 12 shoots (ISO 100–12800, 1/1250 s–25 s): the as-shot
+R, G, G, B quadruple is followed by its colour temperature (3271–7424 K across the shoots) and then the fixed
+preset table (Daylight 5200 K, Shade 7000 K, Cloudy 6000 K, Tungsten 3200 K, ...), and the black levels equal the
+masked-column levels in every file (512 at low ISO, 2047–2048 above). Word 661 holds 14351 or 13995, but it is not
+the clipping point: highlights pile up at 16383 and run smoothly through the range above 14351, so version 66
+takes its white level from the data.
+
 The in-camera aspect ratio (3:2, 4:3, 16:9, 1:1) is not applied to the sensor data. The maker note's
 `AspectInfo` (tag `0x009a`: aspect code, cropped width, height, left, top) gives the shot's rectangle inside the
 recommended crop, and the decoder uses it as the default crop, so the developed image has the shape the photographer
@@ -24,7 +32,7 @@ are the public prose descriptions and patents cited in
 embedded-JPEG fallback and its visible warning when a JPEG is present. So does
 any other CR3 decode error (a corrupt file, or a body whose CRX stream the
 decoder misreads): every CR3 opened from its embedded JPEG before this decoder,
-and only three bodies are verified, so a CR3 never fails to import or load
+and only four bodies are verified, so a CR3 never fails to import or load
 where a preview exists. HEVC-only preview tracks are recognized but are not
 decoded.
 
@@ -54,12 +62,30 @@ control. The exact inputs and reference hashes are:
 | Canon R100 C-RAW, raw.pixls.us 7897 | `0b66842b2fe00329ebc05fe8ab9357ddbbe1a0a2d2e69a2893102de7fdf5c942` | `341c706b37c38bbf` |
 | Canon R8 RAW, raw.pixls.us 6585 | `7d5c6dbb11ff7e6ee58715d90a20f5d801e8b103f4711ff6ea329ceafcef254c` | `63c1c6d8d1eb2312` |
 | Canon R8 C-RAW, raw.pixls.us 6587 | `df33cf394573645ce03dea1b2e9f0b5cc2b7734e9e3391ee7114151414cf2812` | `f836a663a795a375` |
+| Canon RP RAW, raw.pixls.us 4674 | `dcbd0f6f9929de2e2331b0fd10a9d01e7cfd04c5a5e4038456de1647d714cdf2` | `5cb0f46404b8b663` |
+| Canon RP C-RAW, raw.pixls.us 4672 | `bd3270610593d37ff8a399908bb9406a4e32f9151d55bf19ac1cf8f10d787b46` | `f48df06ca1d67382` |
+| Canon RP RAW, 1.6× crop, raw.pixls.us 4673 | `7d4ba45dc9264d598336133593c677b09774bcdf13b602ee770e72415a652a16` | `46808a9de3b3dcc7` |
+| Canon RP C-RAW, 1.6× crop, raw.pixls.us 4671 | `4a859ab137f792aedaf3416b0aad1497ebaab02052a49453902e226699154aa7` | `39a60c4efed4e1f4` |
+
+The EOS R5 Mark II files (raw.pixls.us 7881–7884, CC0) are pinned to LightCraft's own decode; no external
+decoder was run on them:
+
+| File | Input SHA-256 | Sensor FNV-1a (u16 little-endian) |
+|---|---|---|
+| Canon R5 Mark II RAW, raw.pixls.us 7881 | `d6e6aa3b493ea8936dff0efb0cc17c87471437e7317bce37c8c82ba08b9cab7b` | `ff716fb30248496f` |
+| Canon R5 Mark II C-RAW, raw.pixls.us 7882 | `b3c08a5c7a97299dfd58896a12b939e7b43ec78682761812524825e6e5d087be` | `af32b45357b534e5` |
+| Canon R5 Mark II crop-mode RAW, raw.pixls.us 7883 | `9f88c0ff012924193b7f4497559d133dfe626766d600b5d67689156721739ead` | `31cf630afe868958` |
+| Canon R5 Mark II crop-mode C-RAW, raw.pixls.us 7884 | `6a597497776a6abbfab8fcf12d0086ac7a3f8afea2879d61accf6bbf48d357d7` | `4721605b20339332` |
 
 Reference pixels were observed from the DNGLab 0.8.0 macOS arm64 release
 binary; no decoder source was read or copied, and it is not shipped or linked.
 The release ZIP SHA-256 was
 `ee70805cb60f18d5ed62548c4e595f6cee0a33407e15358eb1766a46afc1c16e`.
-All six sensor comparisons pass. R8 HEVC preview tracks are distinguished from
+The RP references came from the same release's Windows x64 binary (ZIP SHA-256
+`d3add6b71568bf5f7938468b0b40a0ee1eaec01e0057fe78dcc453188010be9a`), after it
+reproduced the M50 RAW hash above. The RP's 1.6× crop mode writes a single
+4032×2656 tile, where full frame (6384×4224) uses two 3192-wide horizontal
+tiles. All ten sensor comparisons pass. R8 HEVC preview tracks are distinguished from
 the primary Bayer RAW; the HEVC preview itself is not decoded. Missing corpus
 files are reported as skipped by the tests.
 
@@ -68,6 +94,34 @@ Controlled input mutations establish floor averaging of paired QP rows before
 the nonlinear integer table, then multiplication, division by eight, addition
 of the subband base and a minimum step of one. QP values 131–167 are verified;
 unmeasured values are rejected.
+
+The QP map is coded as follows (established on the EOS R5 Mark II). Its first symbol is a 32-bit
+big-endian literal, mapped like every other symbol and added to a prediction of zero. Every later
+symbol is Rice coded with a limited-length escape: a quotient of 23 or more is written as 23 zeros,
+the terminating 1 and the symbol in 8 bits. This is the escape layout of ITU-T T.87 for a 32-bit
+code-length limit and 8-bit symbols, without that standard's minus-one offset. In the R8 maps only
+the first symbol needs more than 15 leading zeros, and its bits read the same whether taken as a
+32-bit literal or as an escape after 16 zeros with a 16-bit literal (the rule LightCraft used before).
+The R7 maps decoded to their exact ends under that rule, which a later long prefix would have broken;
+no R7 file was at hand to recheck them. R5 Mark II maps (QP 150–162) also jump by up to 12 where the Rice parameter is 0. That
+gives 18- to 22-zero prefixes, which the 16-zero rule misread as escapes ("Canon CRX adaptive QP value
+−21087" and other out-of-range values; the file then opened as a preview). It also gives real escapes,
+symbols 23 and 24. Escapes were seen only where the Rice parameter is 0 (in 100 of 612 maps; all 351 inspected, up to 10 per map); at a larger
+parameter they would use the same layout, which is unobserved. With this coding the QP maps of all
+33,665 R5 Mark II C-RAW files in a private library (version `0x200`, 8480 × 5650) decode to the exact
+end of their entropy streams, with values 150–162. So do the reduced-size tracks of 306 of those
+files, the two CC0 R5 Mark II C-RAW files above and the R8 C-RAW fixture; all six fixture hashes are
+unchanged. Under the 16-zero rule, 174 of those 306 files (57%) failed and opened as previews, all
+with out-of-range values (none at QP 168). The two CC0 C-RAW files are low-ISO shots whose maps need no
+long prefix: they decoded under the old rule too, so the escape is covered by synthetic unit tests in
+`crx.rs` rather than by a public file. Render cache version 43 redraws thumbnails of files whose decode
+changed; photos imported as preview-only switch over with Photo ▸ Reload from Disk.
+
+The R5 Mark II sensor has 5650 rows (3574 in crop mode), so its Bayer planes have odd heights (2825,
+1787). Lossless planes decode as before. In C-RAW every wavelet level has an odd height (2825 → 1413 →
+707), and each subband's entropy stream ends exactly where the subband geometry says. The synthesis
+uses the same boundary rules that are verified on the R8's odd lengths. Decoded rows show no step
+down to the last sensor row, and the developed images match the camera's embedded JPEGs at 100 %.
 
 An odd QP-map height (EOS R7: 4732 sensor rows give 1183 QP rows) leaves the
 last row of the second-level high-frequency bands without a partner row; that
@@ -82,6 +136,15 @@ remain unsupported. The decoder bounds image dimensions, sample count,
 tile count, marker headers and temporary allocations. The full sensor buffer is
 allocated only after the first plane decodes, and plane buffers grow row by row,
 so a small crafted file fails before reserving memory for the image it claims.
+
+## White level
+
+The white level is Canon's specular white from `ColorData` (the word after the
+normal white level), not the sensor's saturation point. On the RP at ISO 100
+it is 14558 while samples clip at 16383. At the −⅓-stop ISOs, which pull a
+higher analog ISO down digitally, it drops further: 11062 at ISO 5000, where
+red saturates near 13668. Samples above the white level render as clipped.
+Whether Lightroom recovers them has not been measured.
 
 ## Colour limits
 

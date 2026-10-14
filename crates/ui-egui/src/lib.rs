@@ -7,6 +7,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod album_picker;
+pub mod brush_live;
+mod command_error;
 pub mod control;
 pub mod credits;
 pub mod date_picker;
@@ -28,6 +30,7 @@ pub mod pick;
 pub mod region;
 pub mod render;
 pub mod shortcuts;
+pub mod sidebar;
 pub mod softpaint;
 pub mod state;
 pub mod sync;
@@ -41,6 +44,8 @@ pub mod widgets;
 mod tests_activity;
 #[cfg(test)]
 mod tests_album_picker;
+#[cfg(test)]
+mod tests_appearance;
 #[cfg(test)]
 mod tests_before_after;
 #[cfg(test)]
@@ -56,9 +61,15 @@ mod tests_curve;
 #[cfg(test)]
 mod tests_date_picker;
 #[cfg(test)]
+mod tests_dialog_fit;
+#[cfg(test)]
 mod tests_dialogs;
 #[cfg(test)]
+mod tests_error_kinds;
+#[cfg(test)]
 mod tests_filmstrip;
+#[cfg(test)]
+mod tests_grading;
 #[cfg(test)]
 mod tests_grid;
 #[cfg(test)]
@@ -72,11 +83,15 @@ mod tests_keyword_list;
 #[cfg(test)]
 mod tests_keyword_set;
 #[cfg(test)]
+mod tests_keyword_sidebar;
+#[cfg(test)]
 mod tests_keywording;
 #[cfg(test)]
 mod tests_labels;
 #[cfg(test)]
 mod tests_library_problem;
+#[cfg(test)]
+mod tests_lights_out;
 #[cfg(test)]
 mod tests_masking;
 #[cfg(test)]
@@ -86,17 +101,25 @@ mod tests_menubar;
 #[cfg(test)]
 mod tests_offline;
 #[cfg(test)]
+mod tests_open_lightroom;
+#[cfg(test)]
 mod tests_panels;
+#[cfg(test)]
+mod tests_preset_import;
 #[cfg(test)]
 mod tests_preview_limit;
 #[cfg(test)]
 mod tests_quit_unsaved;
+#[cfg(test)]
+mod tests_sam_setup;
 #[cfg(test)]
 mod tests_scroll;
 #[cfg(test)]
 mod tests_switch_library;
 #[cfg(test)]
 mod tests_sync;
+#[cfg(test)]
+mod tests_temp_slider;
 #[cfg(test)]
 mod tests_titlebar;
 #[cfg(test)]
@@ -110,13 +133,16 @@ mod tests_zoom_keys;
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use lightcraft_engine::Session;
+use lightcraft_engine::{AiModel, ErrorKind, Session};
 use serde_json::Value;
 
+pub use command_error::CommandError;
 pub use control::{ControlRequest, ControlResponse};
 pub use state::UiState;
 
 const TOAST_SECONDS: f64 = 1.4;
+/// The `path` of a display profile read from the screen rather than chosen as a file.
+pub const SCREEN_PROFILE: &str = "screen";
 
 pub type PickFiles = Box<dyn FnMut() -> Vec<String>>;
 /// A save dialog: suggested file name → chosen path (`None` = cancelled).
@@ -133,9 +159,25 @@ pub type RevealFn = Box<dyn FnMut(&str) -> Result<(), String>>;
 pub type OpenUrlFn = Box<dyn FnMut(&str) -> Result<(), String>>;
 /// Open a file in an application (`app` = "" for the system's default one).
 pub type OpenWithFn = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
+/// Open several files with one start of an application (`app` as for [`OpenWithFn`]).
+pub type OpenAllWithFn = Box<dyn FnMut(&[String], &str) -> Result<(), String>>;
+/// Linux model-folder work: wait for the default opener on a background task.
+#[cfg(target_os = "linux")]
+pub type OpenModelFolderFn = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+/// The ICC profile of the screen showing the window, as the system colour-manages it (`None`:
+/// not known).
+pub type ScreenProfileFn = Box<dyn FnMut() -> Option<Vec<u8>>>;
+/// Whether an external editor can be started (its name as in [`Services::open_with`]); the
+/// error says why not and what to do (e.g. PhotoCraft isn't installed).
+pub type CheckEditorFn = Box<dyn Fn(&str) -> Result<(), String>>;
 /// Something the host does with the session (web: back up or restore the library in browser
 /// storage); the work may finish asynchronously.
 pub type HostAction = Box<dyn FnMut(&mut Session) -> Result<Value, String>>;
+
+/// The system's dark/light appearance where egui doesn't report one (Linux desktops whose
+/// windowing layer says nothing, e.g. many Wayland compositors). The host answers from what it
+/// last heard and wakes the UI itself when that changes; it is never polled for changes.
+pub type SystemThemeFn = Box<dyn Fn(&egui::Context) -> Option<egui::Theme>>;
 
 /// Platform services injected by the host app (desktop or web).
 #[derive(Default)]
@@ -156,6 +198,9 @@ pub struct Services {
     pub pick_tracklog: Option<PickFiles>,
     /// Open dialog for a monitor ICC profile (`.icc` / `.icm`; Settings ▸ Display; desktop only).
     pub pick_display_profile: Option<PickFiles>,
+    /// The profile of the screen showing the window, used while none is chosen in Settings ▸
+    /// Display (macOS, whose windows aren't colour-managed: issue #787).
+    pub screen_profile: Option<ScreenProfileFn>,
     /// Save dialog for an exported `.lcpreset` file.
     pub save_preset_file: Option<SaveFile>,
     /// Open dialog for a keyword list file (`.txt`, Photo Supreme's `.utf8`; File ▸ Import Keywords…).
@@ -184,12 +229,23 @@ pub struct Services {
     pub open_url: Option<OpenUrlFn>,
     /// Open a file in an external editor (Edit in External Editor; desktop only).
     pub open_with: Option<OpenWithFn>,
+    /// Open several files with one start of the editor (Open Original; desktop only): an editor
+    /// that keeps one window takes them all. None = [`Services::open_with`] for each.
+    pub open_all_with: Option<OpenAllWithFn>,
+    /// Optional worker-safe model-folder opener alongside `open_with` (Linux desktop only).
+    #[cfg(target_os = "linux")]
+    pub open_model_folder: Option<OpenModelFolderFn>,
+    /// Checked before Edit In renders a copy, so a missing editor leaves no copy behind (none =
+    /// assume it can).
+    pub check_editor: Option<CheckEditorFn>,
     /// File ▸ Back Up Library…: save the whole library (catalog and originals) as one file the
     /// user keeps (web only: there the library lives in browser storage, which the browser may
     /// clear; on the desktop it is a folder backed up like any other).
     pub backup_library: Option<HostAction>,
     /// File ▸ Restore Library from Backup… (web only; keeps the current library).
     pub restore_library: Option<HostAction>,
+    /// The system appearance for Appearance Mode ▸ Auto, ahead of egui's own report.
+    pub system_theme: Option<SystemThemeFn>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -289,6 +345,8 @@ pub struct LightcraftApp {
     pub widgets: Vec<(String, egui::Rect)>,
     /// In-progress on-canvas gesture (brush stroke points, gradient drag…).
     pub gesture: Option<panels::detail::Gesture>,
+    /// The brush stroke being painted, as drawn on the photo until it's committed (issue #517).
+    pub brush_live: Option<brush_live::LiveStroke>,
     /// What the loupe drew last frame: photo and source ("render", "cached", "embedded", "small",
     /// "thumb", "none").
     pub loupe_shown: Option<(lightcraft_catalog::PhotoId, &'static str)>,
@@ -302,6 +360,13 @@ pub struct LightcraftApp {
     /// (photo, look, window frame size) a window was refused for: it reads more than one render holds.
     pub(crate) window_refused: Option<(lightcraft_catalog::PhotoId, u64, usize)>,
     pub(crate) region_tiles: std::collections::HashMap<(bool, u64), region::RegionView>,
+    /// The window render each pane of Compare / Reference asked for last (left, right), as
+    /// [`Self::region_view`] is for the loupe.
+    pub compare_windows: [Option<region::RegionView>; 2],
+    /// Compare / Reference window renders by (pane, job key): which texture shows what.
+    pub(crate) compare_tiles: std::collections::HashMap<(u8, u64), region::RegionView>,
+    /// Until when (s) a pinch or scroll in Compare / Reference holds the windows there are.
+    pub(crate) compare_hold_until: f64,
     /// Photo Merge dialog previews and background merges.
     pub merge: merge::MergeState,
     /// An import in progress (the import review dialog's batches).
@@ -318,6 +383,8 @@ pub struct LightcraftApp {
     pub lightroom: Option<lightroom_import::LightroomTask>,
     /// Last terminal Lightroom result, exposed by the command's status/wait response.
     pub lightroom_last: Option<Value>,
+    /// The library generation the window title and the recent list were last updated for.
+    pub shown_library: Option<u64>,
     /// A background export in progress.
     pub export: Option<export_task::ExportTask>,
     /// Background file-system work of other commands (Find Missing Photos, auto import…).
@@ -331,12 +398,19 @@ pub struct LightcraftApp {
     pub window_is_fullscreen: bool,
     /// The GPU preference last applied (`app.gpu`), to apply Settings changes once.
     gpu_applied: Option<bool>,
+    /// Say once, when the GPU device has been tried, that no graphics processor was found
+    /// ([`panels::notices::gpu_notice`]). The desktop app sets it; headless sessions and tests don't.
+    pub gpu_notice: bool,
     /// The memory budget setting last applied (MB, 0 = automatic).
     memory_applied: Option<u32>,
     /// The display profile setting last applied (`app.displayProfile`).
     pub(crate) display_applied: Option<String>,
     /// Why the display profile setting could not be applied (shown in Settings ▸ Display).
     pub display_error: Option<String>,
+    /// The screen profile in use while no display profile is chosen (`services.screen_profile`),
+    /// and when it was last read (egui time, s).
+    pub(crate) screen_profile: Option<Vec<u8>>,
+    pub(crate) screen_profile_read: Option<f64>,
     /// The library failed to open at launch: the blocking window, then the temporary-session
     /// banner (issue #100). Cleared once a library opens.
     pub library_problem: Option<panels::library_problem::LibraryProblem>,
@@ -384,12 +458,16 @@ impl LightcraftApp {
             film_scroll: None,
             widgets: vec![],
             gesture: None,
+            brush_live: None,
             loupe_shown: None,
             region_view: None,
             region_before_view: None,
             size_hold: Default::default(),
             window_refused: None,
             region_tiles: Default::default(),
+            compare_windows: [None; 2],
+            compare_tiles: Default::default(),
+            compare_hold_until: f64::NEG_INFINITY,
             merge: merge::MergeState::default(),
             import: None,
             scan: None,
@@ -398,15 +476,19 @@ impl LightcraftApp {
             sync_run: None,
             lightroom: None,
             lightroom_last: None,
+            shown_library: None,
             export: None,
             tasks: Default::default(),
             last_export_result: None,
             hover_preview: None,
             window_is_fullscreen: false,
             gpu_applied: None,
+            gpu_notice: false,
             memory_applied: None,
             display_applied: None,
             display_error: None,
+            screen_profile: None,
+            screen_profile_read: None,
             library_problem: None,
             activity_expanded: false,
             model_setup: Default::default(),
@@ -430,16 +512,46 @@ impl LightcraftApp {
 
     /// Run a UI or engine command by id. The single entry point for every frontend path.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        self.run_typed(id, params).map_err(|e| e.message)
+    }
+
+    /// [`LightcraftApp::run`], keeping what kind of error a refusal is: for code that decides on it
+    /// (offer a model's download, treat a cancel as one) instead of reading the message.
+    pub fn run_typed(&mut self, id: &str, params: Value) -> Result<Value, CommandError> {
         if let Some(result) = model_setup::intercept(self, id, &params) {
-            return result;
+            return result.map_err(CommandError::from);
         }
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             if r.is_ok() {
                 docking::reveal_command(self, id)?;
             }
-            return r;
+            return r.map_err(CommandError::from);
         }
-        let r = self.session.execute(id, &params).map_err(|e| e.to_string());
+        let params = if id == "crop.aspect"
+            && params.get("aspect").and_then(Value::as_str) == Some("toggle")
+            && self.crop_tool_aspect().is_some()
+            && self.session.active().and_then(|id| self.session.develop_of(id)).is_some_and(|d| d.crop == lightcraft_develop::Crop::default())
+        {
+            serde_json::json!({"aspect": "free"})
+        } else {
+            params
+        };
+        let r = self.session.execute(id, &params).map_err(CommandError::from);
+        if r.is_ok() && matches!(id, "crop.aspect" | "crop.rotateAspect") {
+            self.ui.crop_default_aspect = if id == "crop.aspect" && params.get("aspect").and_then(Value::as_str) == Some("original") {
+                Some(serde_json::json!("original"))
+            } else {
+                self.session
+                    .active()
+                    .and_then(|photo| self.session.develop_of(photo))
+                    .map(|d| d.crop.aspect.map_or(serde_json::json!("free"), |(w, h)| serde_json::json!([w as f64 / 100.0, h as f64 / 100.0])))
+            };
+        }
+        if r.is_ok() && id == "library.clearFilter" {
+            // the search field shows the text filter: cleared from anywhere (the loupe's pill, the
+            // menu), it must not keep a search that no longer applies (issue #1648)
+            self.ui.search.clear();
+        }
         if r.is_ok() && id == "mask.adjust" {
             // Judge local adjustments on the photo, without the selection overlay obscuring them.
             // Keep it hidden after release; O / the overlay eye can show it again.
@@ -477,9 +589,9 @@ impl LightcraftApp {
         match &r {
             Err(e) => {
                 log::warn!("{id}: {e}");
-                self.ui.status = e.clone();
+                self.ui.status = e.message.clone();
                 // no detector yet: offer it (its terms first) instead of only saying so
-                if id == "faces.detect" && e.contains("Settings > Faces") {
+                if id == "faces.detect" && e.kind == ErrorKind::ModelMissing(AiModel::FaceDetector) {
                     panels::faces::offer_detector(self);
                 }
             }
@@ -487,6 +599,46 @@ impl LightcraftApp {
             Ok(_) => {}
         }
         r
+    }
+
+    /// The remembered ratio belongs to the tool until the user starts editing the crop.
+    pub(crate) fn crop_tool_aspect(&self) -> Option<(u32, u32)> {
+        let photo = self.session.active()?;
+        let d = self.session.develop_of(photo)?;
+        if d.crop != lightcraft_develop::Crop::default() {
+            return d.crop.aspect;
+        }
+        match self.ui.crop_default_aspect.as_ref()? {
+            Value::String(s) if s == "original" => {
+                let p = self.session.catalog.photo(photo)?;
+                let (w, h) = (p.width.max(1).saturating_mul(100), p.height.max(1).saturating_mul(100));
+                Some(if d.orientation.swaps_axes() { (h, w) } else { (w, h) })
+            }
+            Value::Array(a) => {
+                let number = |i: usize| {
+                    let v = a.get(i)?.as_f64()? * 100.0;
+                    (v.is_finite() && v >= 1.0 && v <= f64::from(u32::MAX)).then_some(v.round() as u32)
+                };
+                Some((number(0)?, number(1)?))
+            }
+            _ => None,
+        }
+    }
+
+    /// Called only after a crop gesture begins, inside its undo transaction.
+    pub(crate) fn begin_crop(&mut self) -> Result<(), String> {
+        if self.session.interaction.is_some()
+            && self.session.active().and_then(|id| self.session.develop_of(id)).is_some_and(|d| d.crop == lightcraft_develop::Crop::default())
+            && let Some(aspect) = self.ui.crop_default_aspect.clone()
+            && aspect != serde_json::json!("free")
+            && let Err(e) = self.session.execute("crop.aspect", &serde_json::json!({"aspect": aspect}))
+        {
+            // A remembered value the command refuses (a hand-edited settings file) would refuse
+            // every crop drag on an untouched photo: forget it and let this drag go ahead.
+            self.ui.crop_default_aspect = None;
+            self.ui.status = e.to_string();
+        }
+        Ok(())
     }
 
     /// Show a transient toast at the bottom of the canvas (like the reference app's HUD).
@@ -580,6 +732,18 @@ impl LightcraftApp {
         self.ui.toast = Some((text.into(), t + secs, None));
     }
 
+    /// Reverse geocoding: say how a place-names download ended (a failure stays readable, with what to do).
+    fn place_names_outcome(&mut self, ctx: &egui::Context) {
+        use lightcraft_engine::cmd::geocode::DownloadOutcome;
+        match self.session.place_names.take_outcome() {
+            Some(DownloadOutcome::Done(_)) => self.toast(ctx, crate::i18n::tr("Place names downloaded")),
+            Some(DownloadOutcome::Cancelled) => self.toast(ctx, crate::i18n::tr("Place names download cancelled")),
+            Some(DownloadOutcome::Failed(e)) => self.toast_error(ctx, e),
+            None if self.session.place_names.downloading() => ctx.request_repaint_after(std::time::Duration::from_millis(500)),
+            None => {}
+        }
+    }
+
     /// AI masks: apply finished background requests (clicks, descriptions, detail passes) and
     /// show their errors; start a zoomed-in detail pass once the clicking stops
     /// (`ui.detail_due`); watch the model download. Never waits for the model.
@@ -607,16 +771,11 @@ impl LightcraftApp {
         if self.ui.sam_downloading && !download.running {
             self.ui.sam_downloading = false;
             let open = matches!(self.ui.dialog, Some(state::Dialog::SamModel { .. }));
-            match (&download.error, open) {
-                (_, true) => {}
-                (Some(e), false) if e.contains("cancelled") => {
-                    self.toast(ctx, crate::i18n::tr("SAM 3 download stopped: it resumes where it left off next time."))
-                }
-                (Some(e), false) => self.toast_error(ctx, crate::i18n::tr_format!("The SAM 3 download failed: {e}", e = e)),
-                (None, false) if download.finished => {
-                    self.toast_error(ctx, crate::i18n::tr("The SAM 3 model is installed: Object and Describe masks are ready."))
-                }
-                (None, false) => {}
+            match sam_download_ended(&download) {
+                _ if open => {}
+                Some((text, true)) => self.toast_error(ctx, text),
+                Some((text, false)) => self.toast(ctx, text),
+                None => {}
             }
         }
         if let Some((due, mask)) = self.ui.detail_due {
@@ -635,13 +794,14 @@ impl LightcraftApp {
     }
 
     /// An AI mask error: when the model isn't installed, the dialog that offers to download it
-    /// (`then`: the AI mask to start afterwards); otherwise a toast.
-    pub fn ai_error(&mut self, ctx: &egui::Context, e: impl Into<String>, then: Option<(&str, &str)>) {
+    /// (`then`: the AI mask to start afterwards); otherwise a toast. Decided on the error's kind
+    /// ([`ErrorKind::ModelMissing`]), not its words.
+    pub fn ai_error(&mut self, ctx: &egui::Context, e: impl Into<CommandError>, then: Option<(&str, &str)>) {
         let e = e.into();
-        if lightcraft_engine::segment::Segmenter::AVAILABLE && e.starts_with(lightcraft_engine::segment::NOT_INSTALLED) {
+        if lightcraft_engine::segment::Segmenter::AVAILABLE && e.kind == ErrorKind::ModelMissing(AiModel::Sam3) {
             self.offer_sam_download(then);
         } else {
-            self.toast_error(ctx, e);
+            self.toast_error(ctx, e.message);
         }
     }
 
@@ -661,6 +821,11 @@ impl LightcraftApp {
     fn drain_control(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.control_rx.take() else { return };
         while let Ok(req) = rx.try_recv() {
+            // a request its sender gave up on (the window drew nothing for a while) is not run
+            // late: it would happen twice once the sender retries (issue #718)
+            if !req.take() {
+                continue;
+            }
             let reply = req.reply.clone();
             match control::handle(self, ctx, &req) {
                 control::Outcome::Done(v) => {
@@ -730,6 +895,20 @@ impl LightcraftApp {
         self.pending_screenshots = shots;
         if !self.pending_screenshots.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
+    /// The system's appearance: the host's answer first, then egui's (none: unknown).
+    pub fn system_theme(&self, ctx: &egui::Context) -> Option<egui::Theme> {
+        self.services.system_theme.as_ref().and_then(|read| read(ctx)).or_else(|| ctx.system_theme())
+    }
+
+    /// Restyle `ctx` when the theme the settings select (Appearance Mode, the dark and light
+    /// themes, the system's appearance in Auto) is not the one it shows. A no-op otherwise.
+    pub fn sync_theme(&mut self, ctx: &egui::Context) {
+        let wanted = self.ui.settings.theme(self.system_theme(ctx));
+        if theme::current(ctx) != Some(wanted) {
+            theme::apply_kind(ctx, wanted);
         }
     }
 
@@ -836,6 +1015,7 @@ impl LightcraftApp {
         } else {
             self.fonts_ready = true;
         }
+        self.sync_theme(ctx);
         panels::notices::logic(self);
         // closing the window (or Quit) with changes only in memory: retry, else ask first
         if ctx.input(|i| i.viewport().close_requested()) && !panels::notices::may_close(self) {
@@ -983,6 +1163,12 @@ impl LightcraftApp {
                 }
             }
             self.display_applied = Some(path);
+            // none chosen again: the screen's profile is read afresh
+            self.screen_profile = None;
+            self.screen_profile_read = None;
+        }
+        if self.ui.settings.display_profile.is_empty() {
+            self.follow_screen_profile(ctx);
         }
         if let Some(fs) = ctx.input(|i| i.viewport().fullscreen) {
             self.window_is_fullscreen = fs;
@@ -991,6 +1177,37 @@ impl LightcraftApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
             self.window_is_fullscreen = on;
         }
+    }
+
+    /// While no display profile is chosen, show previews through the profile of the screen the
+    /// window is on (`services.screen_profile`), read about once a second so moving the window to
+    /// another screen is followed. Without the service (or a profile) the display is sRGB.
+    fn follow_screen_profile(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if self.services.screen_profile.is_none() || self.screen_profile_read.is_some_and(|t| (0.0..1.0).contains(&(now - t))) {
+            return;
+        }
+        self.screen_profile_read = Some(now);
+        self.apply_screen_profile();
+    }
+
+    /// Read the screen's profile now and show previews through it (sRGB without one).
+    pub(crate) fn apply_screen_profile(&mut self) {
+        let Some(read) = self.services.screen_profile.as_mut() else { return };
+        let icc = read();
+        if icc == self.screen_profile {
+            return;
+        }
+        let display = icc.as_deref().and_then(|bytes| match lightcraft_engine::display::Display::from_bytes(SCREEN_PROFILE, bytes) {
+            Ok(d) => Some(std::sync::Arc::new(d)),
+            Err(msg) => {
+                // a profile we can't use: previews stay sRGB, as before #787
+                log::warn!("screen profile: {msg}");
+                None
+            }
+        });
+        self.renderer.set_display(display);
+        self.screen_profile = icc;
     }
 
     /// Inject synthetic events (pointer events one per frame; key sequences up to the release).
@@ -1028,6 +1245,30 @@ impl LightcraftApp {
         raw.events.extend(self.synthetic.drain(..n));
     }
 
+    /// Lights Out: veil everything but the photo (the loupe's image, or the grid / Compare /
+    /// Survey area) in black. Painted above the panels, below dialogs and notices.
+    fn lights_out(&self, ctx: &egui::Context) {
+        let a = self.ui.lights_out.veil();
+        if a <= 0.0 {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let keep = if self.ui.view == state::ViewMode::Detail { self.image_rect.or(self.canvas_rect) } else { self.canvas_rect };
+        let veil = egui::Color32::from_black_alpha((a.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("lights-out")));
+        let k = keep.unwrap_or(egui::Rect::NOTHING).intersect(screen);
+        if !k.is_positive() {
+            p.rect_filled(screen, 0.0, veil);
+            return;
+        }
+        // four bands around the photo
+        use egui::{Rect, pos2};
+        p.rect_filled(Rect::from_min_max(screen.min, pos2(screen.right(), k.top())), 0.0, veil);
+        p.rect_filled(Rect::from_min_max(pos2(screen.left(), k.bottom()), screen.max), 0.0, veil);
+        p.rect_filled(Rect::from_min_max(pos2(screen.left(), k.top()), pos2(k.left(), k.bottom())), 0.0, veil);
+        p.rect_filled(Rect::from_min_max(pos2(k.right(), k.top()), pos2(screen.right(), k.bottom())), 0.0, veil);
+    }
+
     /// Frame timings once layout is done (`t0`: when layout started).
     fn end_frame(&mut self, ctx: &egui::Context, t0: f64) {
         ctx.output(|o| {
@@ -1040,6 +1281,29 @@ impl LightcraftApp {
         self.perf.frame_ms = now_ms() - t0;
         self.perf.update_ms = self.perf.logic_ms + self.perf.frame_ms;
         self.perf.max_update_ms = self.perf.max_update_ms.max(self.perf.update_ms);
+    }
+
+    /// Once per library opened (at launch too): name it in the window title, so nobody edits in
+    /// the wrong one, and put it first in File ▸ Open Recent Library.
+    pub(crate) fn library_changed(&mut self, ctx: &egui::Context) {
+        let generation = self.session.library_generation();
+        if self.shown_library == Some(generation) {
+            return;
+        }
+        self.shown_library = Some(generation);
+        if let Some(l) = self.session.library.as_ref().filter(|l| l.on_disk) {
+            let path = l.dir.to_string_lossy().into_owned();
+            panels::settings::remember_library(&mut self.ui.settings.recent_libraries, &path);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+    }
+
+    /// "LightCraft — <library name>" (just "LightCraft" for a library that isn't saved).
+    pub fn window_title(&self) -> String {
+        match panels::settings::open_library_name(self) {
+            Some(name) => format!("LightCraft — {name}"),
+            None => "LightCraft".to_string(),
+        }
     }
 
     /// Lay out the whole window.
@@ -1055,9 +1319,11 @@ impl LightcraftApp {
         if std::mem::take(&mut self.ui.quit) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        self.library_changed(&ctx);
         // panels set it again this frame while the pointer rests on a preset or profile
         self.hover_preview = None;
         self.ai_mask_detail(&ctx);
+        self.place_names_outcome(&ctx);
         if self.ui.fullscreen {
             // full-screen preview: the photo alone on black
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::BLACK)).show(ui, |ui| panels::detail::show(self, ui));
@@ -1076,15 +1342,18 @@ impl LightcraftApp {
         panels::library_problem::banner(self, ui);
         panels::strip::show(self, ui);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| docking::show(self, ui));
+        self.lights_out(&ctx);
         panels::second::show(self, &ctx);
         panels::notices::show(self, &ctx);
         panels::dialogs::show(self, &ctx);
         panels::library_problem::show(self, &ctx);
         export_task::poll(self, &ctx);
         panels::activity::show(self, &ctx);
+        export_task::poll_photos(self, &ctx);
         pick::poll(self, &ctx);
         panels::grid::drag_feedback(self, &ctx);
         panels::left::album_drag_feedback(self, &ctx);
+        panels::left::section_drag_feedback(self, &ctx);
         panels::keyword_list::drag_feedback(self, &ctx);
         panels::toast(self, &ctx);
         self.widgets = widgets::take_registry(&ctx);
@@ -1142,6 +1411,19 @@ fn detect_summary(v: &Value) -> String {
         (0, n) => format!("No faces found in {}", plural(n, "photo")),
         (f, 1) => format!("Found {}", plural(f, "face")),
         (f, _) => format!("Found {} in {}", plural(f, "face"), plural(with, "photo")),
+    }
+}
+
+/// What to say when a SAM 3 download ended while its dialog was closed: the text, and whether it is
+/// shown as an error toast. A cancel is told by `cancelled`, not by the error's words.
+fn sam_download_ended(download: &lightcraft_engine::segment::DownloadStatus) -> Option<(String, bool)> {
+    match &download.error {
+        Some(_) if download.cancelled => {
+            Some((crate::i18n::tr("SAM 3 download stopped: it resumes where it left off next time.").to_string(), false))
+        }
+        Some(e) => Some((crate::i18n::tr_format!("The SAM 3 download failed: {e}", e = e), true)),
+        None if download.finished => Some((crate::i18n::tr("The SAM 3 model is installed: Object and Describe masks are ready.").to_string(), true)),
+        None => None,
     }
 }
 

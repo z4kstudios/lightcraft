@@ -99,7 +99,7 @@
 //! 1 and 3, and bit depths other than the ones above (no samples of any of them).
 
 use super::pef::{Bits, Huffman, diff};
-use super::white_from_data;
+use super::{active_rows, white_from_data};
 use crate::{BlackLevel, Cfa, ColorData, MAX_SAMPLES, Mode, Opcode, OpcodeLists, RawData, RawError, RawFormat, RawImage, Rect, Result};
 use lightcraft_geom::Orientation;
 use lightcraft_tiff::{ByteOrder, Ifd, Tiff, Value, tags as t};
@@ -122,7 +122,7 @@ const RAW_FORMAT: u16 = 0x002d;
 /// The in-camera aspect-ratio crop: top, left, bottom, right in sensor coordinates.
 const CROP: [u16; 4] = [0x002f, 0x0030, 0x0031, 0x0032];
 const ISO_32: u16 = 0x0037;
-const RAW_OFFSET: u16 = 0x0118;
+pub(crate) const RAW_OFFSET: u16 = 0x0118;
 const HUFFMAN_CODES: u16 = 0x0040;
 const STRIP_OFFSETS: u16 = 0x0044;
 const STRIP_LEFT: u16 = 0x0045;
@@ -495,12 +495,6 @@ fn fill_defects(data: &mut [u16], w: usize, area: Rect) {
             }
         }
     }
-}
-
-/// Samples of up to 512 evenly spaced rows of the active area (the borders hold junk such as 0xffff runs).
-fn active_rows(data: &[u16], w: usize, a: Rect) -> Vec<u16> {
-    let step = (a.height / 512).max(1);
-    (a.y..a.y + a.height).step_by(step).filter_map(|y| data.get(y * w + a.x..y * w + a.x + a.width)).flatten().copied().collect()
 }
 
 fn cfa(code: u16) -> Cfa {

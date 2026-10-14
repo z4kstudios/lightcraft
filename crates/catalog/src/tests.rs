@@ -466,7 +466,7 @@ fn set_embedded_lens_is_undoable_and_journaled() {
         photo: Box::new(Photo::new(a, Source::File { path: "/x.rw2".into() }, "x.rw2", "RW2", 4000, 3000, "2026-10-06T00:00:00")),
     })
     .unwrap();
-    let lens = lightcraft_develop::EmbeddedLens { warp: Some(Default::default()), vignette: None };
+    let lens = lightcraft_develop::EmbeddedLens { warp: Some(Default::default()), vignette: None, stages: Default::default() };
     let op = Op::SetEmbeddedLens { id: a, lens: Some(Box::new(lens)) };
     let op: Op = serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
     let inv = c.apply(op).unwrap();
@@ -474,6 +474,27 @@ fn set_embedded_lens_is_undoable_and_journaled() {
     let inv: Op = serde_json::from_str(&serde_json::to_string(&inv).unwrap()).unwrap();
     c.apply(inv).unwrap();
     assert_eq!(c.photo(a).unwrap().embedded_lens, None);
+}
+
+/// A decode or Reload stores the as-shot white a raw reads through its camera's matrices; the inverse (through the
+/// journal's JSON) takes it back, and a value that is not a number is refused.
+#[test]
+fn set_as_shot_wb_is_undoable_journaled_and_checked() {
+    let mut c = Catalog::default();
+    let a = c.alloc_photo_id();
+    let mut p = Photo::new(a, Source::File { path: "/x.arw".into() }, "x.arw", "ARW", 4000, 3000, "2026-10-06T00:00:00");
+    p.as_shot_wb = Some((6500.0, 0.0));
+    c.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    let op = Op::SetAsShotWb { id: a, wb: Some((4986.0, -2.0)) };
+    let op: Op = serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
+    let inv = c.apply(op).unwrap();
+    assert_eq!(c.photo(a).unwrap().as_shot_wb, Some((4986.0, -2.0)));
+    let inv: Op = serde_json::from_str(&serde_json::to_string(&inv).unwrap()).unwrap();
+    c.apply(inv).unwrap();
+    assert_eq!(c.photo(a).unwrap().as_shot_wb, Some((6500.0, 0.0)));
+    assert!(c.apply(Op::SetAsShotWb { id: a, wb: Some((f64::NAN, 0.0)) }).is_err());
+    assert!(c.apply(Op::SetAsShotWb { id: PhotoId(999), wb: None }).is_err());
+    assert_eq!(c.photo(a).unwrap().as_shot_wb, Some((6500.0, 0.0)));
 }
 
 /// A saved smart album whose rules no longer check (the album a rule tests was deleted) is found,
@@ -672,4 +693,47 @@ fn undated_photos_group_under_unknown_date_and_sort_together() {
     assert_eq!(c.query(&filter_day, &Sort::default()), vec![]);
     let filter_year = Filter { date: Some("2026".into()), ..Default::default() };
     assert_eq!(c.query(&filter_year, &Sort { key: SortKey::CaptureDate, ascending: false, ..Default::default() }), vec![p_dated2, p_dated1]);
+}
+
+/// Photos with one import time and capture time, as one import batch or a burst gives them, added
+/// with ids that run opposite to their names.
+fn batch_with_reversed_ids(c: &mut Catalog) -> Vec<PhotoId> {
+    let names = ["DSC_0001.ARW", "DSC_0002.ARW", "DSC_0003.ARW", "DSC_0004.ARW"];
+    let mut ids = Vec::new();
+    for (n, name) in names.iter().enumerate() {
+        let id = PhotoId(1000 - n as u64);
+        let mut p = Photo::new(id, Source::Demo { scene: 1 }, name, "ARW", 10, 10, "2026-10-10T09:00:00");
+        p.captured = Some("2026-10-01T12:00:00".into());
+        c.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+        ids.push(id);
+    }
+    ids // in name order
+}
+
+#[test]
+fn one_import_batch_sorts_by_file_name_not_id() {
+    let mut c = Catalog::new();
+    let by_name = batch_with_reversed_ids(&mut c);
+    let sort = Sort { key: SortKey::ImportDate, ascending: true, ..Default::default() };
+    assert_eq!(c.query(&Filter::default(), &sort), by_name);
+}
+
+#[test]
+fn burst_in_one_second_sorts_by_file_name_not_id() {
+    let mut c = Catalog::new();
+    let by_name = batch_with_reversed_ids(&mut c);
+    let sort = Sort { key: SortKey::CaptureDate, ascending: true, ..Default::default() };
+    assert_eq!(c.query(&Filter::default(), &sort), by_name);
+}
+
+#[test]
+fn cmp_name_ignores_case_without_allocating() {
+    use crate::query::cmp_name;
+    use std::cmp::Ordering::*;
+    assert_eq!(cmp_name("IMG_1.JPG", "img_1.jpg"), Equal);
+    assert_eq!(cmp_name("Ärger.jpg", "ärger.jpg"), Equal);
+    assert_eq!(cmp_name("a", "B"), Less);
+    assert_eq!(cmp_name("B", "a"), Greater);
+    assert_eq!(cmp_name("DSC_0001", "DSC_0002"), Less);
+    assert_eq!(cmp_name("a", "ab"), Less);
 }

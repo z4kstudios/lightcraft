@@ -9,7 +9,8 @@
 //! - [`read_header`] reads a file's stored dimensions and orientation from its headers, without
 //!   decoding pixels (import probes).
 //! - [`decode_thumbnail`] is the fast path for grid thumbnails (EXIF thumbnail or DCT-scaled decode).
-//! - [`encode`] writes JPEG, PNG, TIFF, lossless WebP and (native, feature `avif`) AVIF, embedding
+//! - [`encode`] writes JPEG, PNG, TIFF, lossless WebP and, on native targets, AVIF (feature `avif`) and
+//!   JPEG XL ([`encode_jxl`], feature `jxl`), embedding
 //!   ICC/EXIF/XMP. [`icc::write_matrix_trc`] builds profiles for export.
 //!
 //! No decoder panics on malformed input (property-tested).
@@ -27,8 +28,10 @@ mod jpeg;
 pub mod jpeg_par;
 #[cfg(feature = "jxl")]
 mod jxl;
+mod jxl_encode;
 mod other;
 mod png_codec;
+pub mod proof;
 mod psd;
 mod sniff;
 pub mod space;
@@ -36,9 +39,10 @@ mod tiff_codec;
 mod webp;
 
 pub use encode::{
-    ChromaSubsampling, EncodeImage, EncodeMeta, HDR_REFERENCE_WHITE_NITS, Samples, TiffCompression, encode_avif, encode_avif_pq, encode_jpeg,
-    encode_png, encode_tiff, encode_webp_lossless,
+    ChromaSubsampling, EncodeImage, EncodeMeta, HDR_REFERENCE_WHITE_NITS, HLG_REFERENCE_PEAK_NITS, HdrTransfer, Samples, TiffCompression,
+    encode_avif, encode_avif_hdr, encode_avif_pq, encode_jpeg, encode_png, encode_png_pq, encode_psd, encode_tiff, encode_webp_lossless, hlg_signal,
 };
+pub use jxl_encode::{JxlColour, JxlEffort, JxlOptions, encode_jxl};
 pub use sniff::{Format, sniff};
 pub use space::{NamedSpace, SourceSpace, SpaceOrigin, Trc};
 
@@ -240,12 +244,24 @@ pub fn decode_unguarded(bytes: &[u8], format: Format, opts: &DecodeOptions) -> R
 }
 
 /// Convert a decode result to linear Rec.2020 D65 (Bradford-adapted), the develop working space.
+///
+/// The working space has no alpha: transparency is flattened onto white, in linear light like the rest
+/// of the pipeline (issue #1212).
 pub fn to_working(d: &Decoded) -> Rgb32f {
-    if d.space.is_working() {
-        return d.image.clone();
+    let mut img = if d.space.is_working() {
+        d.image.clone()
+    } else {
+        let m = d.space.to_working().to_f32();
+        d.image.map(|p| mat_apply(&m, p))
+    };
+    // white is (1, 1, 1) in the working space too: the conversion is white-preserving
+    if let Some(a) = d.alpha.as_ref().filter(|a| a.width == img.width && a.height == img.height) {
+        for (p, &av) in img.data.iter_mut().zip(&a.data) {
+            let av = av.clamp(0.0, 1.0);
+            *p = p.map(|c| c * av + (1.0 - av));
+        }
     }
-    let m = d.space.to_working().to_f32();
-    d.image.map(|p| mat_apply(&m, p))
+    img
 }
 
 /// Where a thumbnail came from.

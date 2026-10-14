@@ -51,8 +51,10 @@ pub struct TextField<'a> {
     text: &'a mut String,
     multiline: bool,
     hint: Option<String>,
+    label: Option<String>,
     width: Option<f32>,
     select_on_focus: bool,
+    begin_edit: bool,
     frame: bool,
     font: Option<egui::FontId>,
     color: Option<egui::Color32>,
@@ -66,6 +68,12 @@ pub fn id(widget: &str) -> egui::Id {
     egui::Id::new("lc-text-field").with(widget)
 }
 
+/// Whether the field had an unfinished edit on the immediately preceding egui pass.
+pub(crate) fn was_editing(ctx: &egui::Context, widget: &str) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<Memo>(id(widget).with("memo")).is_some_and(|memo| memo.before.is_some() && memo.pass.checked_add(1) == Some(pass)))
+}
+
 impl<'a> TextField<'a> {
     /// A one-line field (Return ends the edit) registered as `widget`.
     pub fn singleline(widget: &'a str, text: &'a mut String) -> Self {
@@ -74,8 +82,10 @@ impl<'a> TextField<'a> {
             text,
             multiline: false,
             hint: None,
+            label: None,
             width: None,
             select_on_focus: false,
+            begin_edit: false,
             frame: true,
             font: None,
             color: None,
@@ -93,6 +103,13 @@ impl<'a> TextField<'a> {
     /// Grey text shown while the field is empty.
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    /// The name a screen reader announces for the field (its visible caption); the hint
+    /// stands in when there is none.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
@@ -139,6 +156,12 @@ impl<'a> TextField<'a> {
         self
     }
 
+    /// Initialize a newly revealed value editor before its first input is processed.
+    pub(crate) fn begin_edit(mut self, on: bool) -> Self {
+        self.begin_edit = on;
+        self
+    }
+
     pub fn show(self, ui: &mut Ui) -> TextFieldResponse {
         let id = id(self.widget);
         let mut memo: Memo = ui.data_mut(|d| d.get_temp(id.with("memo"))).unwrap_or_default();
@@ -149,6 +172,12 @@ impl<'a> TextField<'a> {
             memo = Memo::default();
         }
         memo.pass = pass;
+        if self.begin_edit {
+            memo.before = Some(self.text.clone());
+            memo.select_on_release = false;
+            ui.memory_mut(|m| m.request_focus(id));
+            select_all(ui.ctx(), id, self.text);
+        }
         // a choice from the menu last frame: the field takes the focus back and does it, with
         // egui's own handling of the clipboard events (a password is never copied)
         if let Some(action) = memo.action.take() {
@@ -162,6 +191,7 @@ impl<'a> TextField<'a> {
                 Action::Refocus => {}
             }
         }
+        let name = self.label.clone().or_else(|| self.hint.clone());
         let mut edit = if self.multiline { egui::TextEdit::multiline(self.text) } else { egui::TextEdit::singleline(self.text) };
         edit = edit.id(id);
         if let Some(hint) = self.hint {
@@ -194,6 +224,11 @@ impl<'a> TextField<'a> {
         let right = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary) || i.pointer.button_released(egui::PointerButton::Secondary));
         let selection = egui::text_edit::TextEditState::load(ui.ctx(), id).and_then(|s| s.cursor.char_range());
         let mut response = ui.add(edit);
+        // screen readers: the field by its caption, even once it holds text (egui names it by
+        // nothing but its contents)
+        if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
+            ui.ctx().accesskit_node_builder(response.id, |node| node.set_label(name));
+        }
         // The menu may take focus on a primary-button release. egui collapses a
         // TextEdit selection when focus leaves; retain the range our own menu acts on.
         if right && response.contains_pointer() || memo.menu_open && !ui.memory(|m| m.has_focus(id)) {
@@ -205,6 +240,10 @@ impl<'a> TextField<'a> {
         // egui's own focus: `Response::has_focus` is also false while the window is in the
         // background (another app in front), which neither ends nor restarts an edit
         let focused = ui.memory(|m| m.has_focus(id));
+        // The opening press may place a cursor; keep the original selected, never replacement text.
+        if self.begin_edit && focused && !response.changed() {
+            select_all(ui.ctx(), id, self.text);
+        }
 
         // an edit not under way (none, or one cut short when the field went away) is forgotten
         let in_menu = memo.away || memo.menu_open || memo.action.is_some();

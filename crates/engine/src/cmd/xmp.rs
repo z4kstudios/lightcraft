@@ -12,8 +12,9 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
     let mut merged = Vec::new();
     let mut backups = Vec::new();
     let mut failed = Vec::new();
-    let owners = crate::sidecar::StemOwners::of(&s.catalog);
-    for id in s.targets(p) {
+    let ids = s.targets(p);
+    let owners = crate::sidecar::StemOwners::among(&s.catalog, &ids);
+    for id in ids {
         match s.save_sidecar_with(id, &owners) {
             Ok(r) => {
                 let path = r.path.display().to_string();
@@ -35,11 +36,13 @@ fn read(s: &mut Session, p: &Value) -> Result<Value> {
     let mut ops = Vec::new();
     let mut read = Vec::new();
     let mut failed = Vec::new();
+    let mut warnings = Vec::new();
     for id in s.targets(p) {
-        match s.read_sidecar_op(id) {
-            Ok(Some((op, from))) => {
+        match s.read_sidecar_op_with_warnings(id) {
+            Ok(Some((op, from, mut photo_warnings))) => {
                 ops.push(op);
                 read.push(json!({"id": id.0, "from": from.display().to_string()}));
+                warnings.append(&mut photo_warnings);
             }
             Ok(None) => failed.push(json!({"id": id.0, "error": "no XMP sidecar or embedded XMP"})),
             Err(e) => failed.push(json!({"id": id.0, "error": e.to_string()})),
@@ -47,8 +50,16 @@ fn read(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if !ops.is_empty() {
         s.commit("Read Metadata from File", Op::Batch { ops })?;
+        // Don't auto-write the sidecars just read: that would add our `lc:settings` to one that had
+        // only another app's `crs:` settings, and later reads prefer `lc:settings`, so that app's
+        // next edits would be ignored (issue #934). The next edit, or Save Metadata, writes them.
+        s.skip_auto_write = true;
     }
-    Ok(json!({"read": read, "failed": failed}))
+    let mut result = json!({"read": read, "failed": failed});
+    if !warnings.is_empty() {
+        result["warnings"] = serde_json::to_value(warnings).unwrap_or_default();
+    }
+    Ok(result)
 }
 
 fn prefs(s: &mut Session, p: &Value) -> Result<Value> {
@@ -84,7 +95,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Read Metadata from File",
             ["Photo"],
             None,
-            "{ids?} — reads each photo's XMP sidecar (or a raw/DNG's embedded XMP): metadata and develop settings, one undo step → {read, failed}",
+            "{ids?} — reads each photo's XMP sidecar (or a raw/DNG's embedded XMP): metadata and develop settings, one undo step; never writes the sidecar, even with auto-write on → {read, failed, warnings?: [{path, code, profile?, mode?, fields?}]}",
             has_selection,
             read
         ),

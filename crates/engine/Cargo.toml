@@ -24,9 +24,11 @@ lightcraft-raw = { workspace = true }
 lightcraft-denoise-core = { workspace = true }
 lightcraft-denoise = { workspace = true, optional = true }
 lightcraft-meta = { workspace = true }
+lightcraft-lensdb = { workspace = true }
 lightcraft-faces = { workspace = true }
 miniz_oxide = { workspace = true }
 lightcraft-merge = { workspace = true }
+lightcraft-geocode = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -37,7 +39,7 @@ ab_glyph = { workspace = true }
 harfrust = { version = "0.12", default-features = false, features = ["std"] }
 unicode-segmentation = "1.13"
 lightcraft-segment = { workspace = true, optional = true }
-lightcraft-inpaint = { workspace = true, optional = true }
+lightcraft-ai-inpaint = { workspace = true, optional = true }
 
 # model downloads run natively only (the web build fetches no models)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -46,12 +48,14 @@ lightcraft-fetch = { workspace = true }
 [features]
 # AI masks with SAM 3 (Object / Describe). Off for the web and CLI builds.
 sam = ["dep:lightcraft-segment"]
-# Z4K: AI Remove with LaMa (lightcraft-inpaint). Desktop app and CLI.
-ai-remove = ["dep:lightcraft-inpaint"]
+# Z4K: AI Remove with LaMa (lightcraft-ai-inpaint). Desktop app and CLI.
+ai-remove = ["dep:lightcraft-ai-inpaint"]
 denoise = ["dep:lightcraft-denoise", "lightcraft-denoise/runtime", "lightcraft-gpu/denoise"]
 rawnind-model = ["denoise", "lightcraft-denoise/rawnind-model", "lightcraft-denoise-core/rawnind-model"]
 
 [dev-dependencies]
+# HDR JPEG XL tests read the file's colour encoding
+jxl-oxide = { workspace = true }
 # Lossless synthetic HEIC files (the import test; decoded when the codecs' `heif` feature is on).
 lightcraft-heif = { workspace = true, features = ["testdata"] }
 libc = { workspace = true }

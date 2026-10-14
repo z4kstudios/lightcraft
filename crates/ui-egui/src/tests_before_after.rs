@@ -69,3 +69,93 @@ fn wb_selector_picks_the_same_point_in_the_before_view() {
         }
     }
 }
+
+/// Mean (r, g, b) of the 41 × 41 screen pixels around `at`.
+fn mean_around(shot: &egui::ColorImage, at: egui::Pos2) -> [f32; 3] {
+    let mut sum = [0.0f32; 3];
+    let mut n = 0.0;
+    for y in (at.y as usize - 20)..=(at.y as usize + 20) {
+        for x in (at.x as usize - 20)..=(at.x as usize + 20) {
+            let c = shot[(x, y)];
+            sum[0] += f32::from(c.r());
+            sum[1] += f32::from(c.g());
+            sum[2] += f32::from(c.b());
+            n += 1.0;
+        }
+    }
+    sum.map(|s| s / n)
+}
+
+/// Zoomed in to compare a detail, every Before / After view still shows the edited photo on its
+/// After side. A wipe drew its line through the middle of the photo, which zoomed in is mostly off
+/// screen: the whole view was the Before, the original photo (#1351).
+#[test]
+fn zoomed_in_the_after_side_shows_the_edits() {
+    let app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services { png: None, ..Default::default() });
+    let mut h = Headless::new(app, [1400.0, 900.0], 1.0);
+    let r = h.request("ui.set", json!({"view": "detail", "right": "none", "filmstrip": false}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let r = h.request("engine.execute", json!({"command": "develop.set", "params": {"control": "light.exposure", "value": 1.5}}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    let shot = |h: &mut Headless, mode: BeforeAfter, zoom: Zoom| {
+        h.app.ui.before_after = mode;
+        h.app.ui.zoom = zoom;
+        // (far enough from the middle of the photo that, zoomed in, it is off screen)
+        h.app.ui.pan = (0.25, 0.75);
+        h.settle(SETTLE);
+        h.paint()
+    };
+    for zoom in [Zoom::Fit, Zoom::Percent(100.0), Zoom::Percent(400.0)] {
+        let (edited, original) = (shot(&mut h, BeforeAfter::Off, zoom), shot(&mut h, BeforeAfter::Original, zoom));
+        let c = h.app.canvas_rect.expect("canvas").center();
+        let luma = |m: [f32; 3]| m.iter().sum::<f32>();
+        for mode in [BeforeAfter::SideBySide, BeforeAfter::TopBottom, BeforeAfter::Split, BeforeAfter::SplitTopBottom] {
+            let s = shot(&mut h, mode, zoom);
+            let canvas = h.app.canvas_rect.expect("canvas");
+            // the middle of the After pane, or of the After side of the line
+            let (after, before) = match mode {
+                BeforeAfter::SideBySide | BeforeAfter::Split => {
+                    (c + egui::vec2(canvas.width() / 4.0, 0.0), c - egui::vec2(canvas.width() / 4.0, 0.0))
+                }
+                _ => (c + egui::vec2(0.0, canvas.height() / 4.0), c - egui::vec2(0.0, canvas.height() / 4.0)),
+            };
+            let (a, b) = (mean_around(&s, after), mean_around(&s, before));
+            if matches!(mode, BeforeAfter::Split | BeforeAfter::SplitTopBottom) {
+                // a wipe shows the loupe's own pixels on each side of the line
+                let (e, o) = (mean_around(&edited, after), mean_around(&original, before));
+                assert!((luma(a) - luma(e)).abs() < 6.0, "{mode:?} {zoom:?}: the After side {a:?} is the edited photo {e:?}");
+                assert!((luma(b) - luma(o)).abs() < 6.0, "{mode:?} {zoom:?}: the Before side {b:?} is the original {o:?}");
+            } else {
+                // two views of the same point of the photo: the After one is the brighter
+                assert!(luma(a) > luma(b) + 30.0, "{mode:?} {zoom:?}: the After {a:?} is the edited photo, brighter than the Before {b:?}");
+            }
+        }
+    }
+}
+
+/// Show Original (`\`) is not one of the Before / After layouts, so the bottom bar's
+/// Before/After (Y) button stays dark for it; clicking the button then lays out Before and After
+/// side by side, as it does from the plain view. It used to light up for `\` too, so the same
+/// lit button stood for two different views (#1497).
+#[test]
+fn show_original_does_not_light_the_before_after_button() {
+    assert!(!BeforeAfter::Off.is_layout());
+    assert!(!BeforeAfter::Original.is_layout());
+    for mode in [BeforeAfter::SideBySide, BeforeAfter::Split, BeforeAfter::TopBottom, BeforeAfter::SplitTopBottom] {
+        assert!(mode.is_layout(), "{mode:?}");
+    }
+    let app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), Services { png: None, ..Default::default() });
+    let mut h = Headless::new(app, [1400.0, 900.0], 1.0);
+    let id = h.app.session.visible_cloned()[2];
+    h.request("engine.execute", json!({"command": "library.select", "params": {"ids": [id.0], "active": id.0}}), T);
+    h.app.ui.view = ViewMode::Detail;
+    h.settle(SETTLE);
+    assert_eq!(h.request("engine.execute", json!({"command": "view.showOriginal"}), T)["ok"], true);
+    assert_eq!(h.app.ui.before_after, BeforeAfter::Original);
+    assert!(!h.app.ui.before_after.is_layout(), "the button is dark while the original is shown");
+    h.settle(SETTLE);
+    assert_eq!(h.request("ui.clickWidget", json!({"id": "icon:beforeAfter"}), T)["ok"], true);
+    assert_eq!(h.app.ui.before_after, BeforeAfter::SideBySide, "a click on the dark button opens the layout");
+    assert_eq!(h.request("ui.clickWidget", json!({"id": "icon:beforeAfter"}), T)["ok"], true);
+    assert_eq!(h.app.ui.before_after, BeforeAfter::Off, "a second click closes it");
+}

@@ -402,6 +402,48 @@ fn paste_selected_settings_pastes_only_chosen_copied_groups() {
     assert_eq!(s.develop_of(ids[1]).unwrap().color.vibrance, 30.0);
 }
 
+/// A crop of no size (or a hair wide), as `crop.set` or a sidecar can set it, made the render's
+/// samplers read at infinite coordinates and its blurs ask for sigmas of millions of pixels: with a
+/// healing spot and masks on, render workers panicked (an i32 square in the blur, a bilinear
+/// neighbour past isize::MAX). Such a photo renders, quickly.
+#[test]
+fn degenerate_crops_render_with_spots_and_masks() {
+    for rect in [[0.5, 0.5, 0.5, 0.5], [0.0, 0.0, 1e-9, 1.0]] {
+        let mut s = demo();
+        let id = s.active().unwrap();
+        s.execute("spot.add", &json!({"points": [[0.5, 0.5]], "size": 0.2, "mode": "heal"})).unwrap();
+        s.execute("mask.add", &json!({"kind": "radial", "rx": 0.3, "ry": 0.3})).unwrap();
+        s.execute("mask.add", &json!({"kind": "linear"})).unwrap();
+        s.execute("develop.set", &json!({"control": "effects.clarity", "value": 80})).unwrap();
+        s.execute("develop.set", &json!({"control": "effects.dehaze", "value": 50})).unwrap();
+        s.execute("crop.set", &json!({"rect": rect, "angle": 30})).unwrap();
+        let t = std::time::Instant::now();
+        let r = s.render_now(id, 700, 450).unwrap();
+        assert!(r.image.width >= 1 && r.image.height >= 1, "{rect:?}");
+        assert!(t.elapsed().as_secs_f64() < 60.0, "{rect:?}: {:?}", t.elapsed());
+    }
+}
+
+/// `mask.move` with a delta near `i64::MAX` overflowed `index + delta` (a panic wherever overflow
+/// checks are on); extreme deltas and indices now move the mask to the bottom or the top.
+#[test]
+fn mask_move_with_extreme_deltas() {
+    let mut s = demo();
+    for kind in ["linear", "radial", "brush"] {
+        s.execute("mask.add", &json!({"kind": kind})).unwrap();
+    }
+    let ids = |s: &Session| active_dev(s).masks.iter().map(|m| m.id).collect::<Vec<_>>();
+    let [a, b, c] = ids(&s)[..] else { panic!("{:?}", ids(&s)) };
+    s.execute("mask.move", &json!({"id": b, "delta": i64::MAX})).unwrap();
+    assert_eq!(ids(&s), [a, c, b], "to the bottom");
+    s.execute("mask.move", &json!({"id": b, "delta": i64::MIN})).unwrap();
+    assert_eq!(ids(&s), [b, a, c], "to the top");
+    s.execute("mask.move", &json!({"id": c, "to": i64::MIN})).unwrap();
+    assert_eq!(ids(&s), [c, b, a]);
+    s.execute("mask.move", &json!({"id": c, "to": i64::MAX})).unwrap();
+    assert_eq!(ids(&s), [b, a, c]);
+}
+
 #[test]
 fn masks_reorder_and_duplicate_and_invert() {
     let mut s = demo();
@@ -555,6 +597,36 @@ fn crop_drag_keeps_a_locked_ratio_on_every_handle() {
         let g = active_dev(&s).crop.geometry.rect;
         assert!((g.aspect() - want).abs() < 1e-6, "{handle}: {} vs {want}", g.aspect());
     }
+}
+
+// Feature: Shift while dragging keeps the current proportions (issue 614)
+#[test]
+fn crop_drag_keep_ratio_holds_the_shape_with_the_lock_off() {
+    let mut s = demo();
+    s.execute("crop.set", &json!({"rect": [0.1, 0.2, 0.7, 0.6]})).unwrap();
+    assert!(active_dev(&s).crop.aspect.is_none(), "lock is off");
+    let r = active_dev(&s).crop.geometry.rect;
+    let want = r.aspect();
+    for (handle, to) in [("left", [r.x0 + 0.1, 0.5]), ("top", [0.5, r.y0 + 0.05]), ("bottomRight", [1.3, 1.3]), ("right", [0.9, 0.5])] {
+        s.execute("crop.drag", &json!({"handle": handle, "from": [0.5, 0.5], "to": to, "start": [r.x0, r.y0, r.x1, r.y1], "keepRatio": true}))
+            .unwrap();
+        let g = active_dev(&s).crop.geometry.rect;
+        assert!((g.aspect() - want).abs() < 1e-6, "{handle}: {} vs {want}", g.aspect());
+        assert!(active_dev(&s).crop.aspect.is_none(), "the lock toggle is untouched");
+    }
+}
+
+#[test]
+fn crop_drag_without_keep_ratio_and_lock_off_is_free() {
+    let mut s = demo();
+    s.execute("crop.set", &json!({"rect": [0.1, 0.2, 0.7, 0.6]})).unwrap();
+    let r = active_dev(&s).crop.geometry.rect;
+    let want = r.aspect();
+    s.execute("crop.drag", &json!({"handle": "right", "from": [0.7, 0.4], "to": [0.9, 0.4], "start": [r.x0, r.y0, r.x1, r.y1]})).unwrap();
+    assert!((active_dev(&s).crop.geometry.rect.aspect() - want).abs() > 1e-3, "ratio changes freely");
+    s.execute("crop.drag", &json!({"handle": "right", "from": [0.7, 0.4], "to": [0.9, 0.4], "start": [r.x0, r.y0, r.x1, r.y1], "keepRatio": false}))
+        .unwrap();
+    assert!((active_dev(&s).crop.geometry.rect.aspect() - want).abs() > 1e-3, "keepRatio false is the same");
 }
 
 #[test]
@@ -1132,4 +1204,285 @@ fn undo_and_redo_show_the_photo_they_change() {
     let before = s.selection.clone();
     s.execute("edit.undo", &json!({})).unwrap();
     assert_eq!(s.selection, before, "a step over several photos keeps the selection");
+}
+
+#[test]
+fn hdr_edits_render_with_their_hdr_histogram() {
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let plain = s.loupe_job(id, 200, 200, true).unwrap().run().rendered.unwrap();
+    assert!(plain.histogram.hdr.is_none(), "SDR edits: the image's histogram");
+    s.execute("develop.hdr", &json!({"enabled": true, "maxEv": 3})).unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 1.0})).unwrap();
+    let r = s.loupe_job(id, 200, 200, true).unwrap().run().rendered.unwrap();
+    let bins = r.histogram.hdr.expect("an HDR edit's histogram");
+    assert_eq!(bins.stops, lightcraft_develop::Hdr::MAX_EV_LIMIT as f32, "a fixed scale");
+    assert!(r.histogram.above_sdr() > 0.0);
+    assert!(r.deep.is_none(), "the preview itself stays the 8-bit SDR rendition");
+}
+
+/// Found by fuzzing catalog snapshots: an album filed under one id but naming its own folder's
+/// listed itself inside itself, and `albums.list` recursed until the stack overflowed (an abort:
+/// no guard catches it). Loading repairs such a catalog (`Catalog::repair`); one that skipped
+/// that still lists, the loop cut off.
+#[test]
+fn albums_list_survives_a_catalog_that_loops() {
+    let mut s = Session::with_demo();
+    let f = s.execute("album.create", &json!({"name": "F", "folder": true})).unwrap()["id"].as_u64().unwrap();
+    let a = s.execute("album.create", &json!({"name": "A", "parent": f})).unwrap()["id"].as_u64().unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&s.catalog.to_snapshot()).unwrap();
+    v["albums"][a.to_string()]["id"] = f.into();
+    // as read, without the repair a load does
+    s.catalog = serde_json::from_value(v).unwrap();
+    let r = s.execute("albums.list", &json!({})).unwrap();
+    assert!(r.to_string().contains("\"F\""), "{r}");
+}
+
+#[test]
+fn develop_paste_validates_groups_and_rejects_malformed_with_zero_mutations() {
+    let mut s = demo();
+    let ids: Vec<_> = s.visible().iter().copied().take(2).collect();
+    let photo_a = ids[0];
+    let photo_b = ids[1];
+
+    // Photo A has exposure = 1.0, vibrance = 30.0
+    s.execute("library.select", &json!({"ids": [photo_a.0]})).unwrap();
+    s.execute("develop.set", &json!({"values": {"light.exposure": 1.0, "color.vibrance": 30.0}})).unwrap();
+    s.execute("develop.copy", &json!({"groups": ["light", "color"]})).unwrap();
+
+    let initial_b_dev = (*s.develop_of(photo_b).unwrap()).clone();
+    let initial_b_hist_len = s.catalog.photo(photo_b).unwrap().history.len();
+
+    // 1. Invalid group names are rejected
+    for invalid_group in ["bogusGroup", "LIGHT", "Exposure", "unknown"] {
+        let err = s.execute("develop.paste", &json!({"ids": [photo_b.0], "groups": [invalid_group]})).unwrap_err();
+        assert!(matches!(err, crate::EngineError::BadParams { .. }));
+        assert_eq!(*s.develop_of(photo_b).unwrap(), initial_b_dev);
+        assert_eq!(s.catalog.photo(photo_b).unwrap().history.len(), initial_b_hist_len);
+    }
+
+    // 2. Incorrect JSON types are rejected
+    for invalid_param in [
+        json!("light"),           // string instead of sequence
+        json!(42),                // number
+        json!(true),              // boolean
+        json!({"name": "light"}), // object
+        json!([123]),             // array of non-string
+        json!(["light", 456]),    // mixed array with invalid type
+        json!([true]),            // array of bool
+    ] {
+        let err = s.execute("develop.paste", &json!({"ids": [photo_b.0], "groups": invalid_param})).unwrap_err();
+        assert!(matches!(err, crate::EngineError::BadParams { .. }));
+        assert_eq!(*s.develop_of(photo_b).unwrap(), initial_b_dev);
+        assert_eq!(s.catalog.photo(photo_b).unwrap().history.len(), initial_b_hist_len);
+    }
+
+    // 3. Valid groups remain supported: pasting only "light" does not paste "color"
+    s.execute("develop.paste", &json!({"ids": [photo_b.0], "groups": ["light"]})).unwrap();
+    let dev_after_light = (*s.develop_of(photo_b).unwrap()).clone();
+    assert_eq!(dev_after_light.light.exposure, 1.0);
+    assert_eq!(dev_after_light.color.vibrance, initial_b_dev.color.vibrance);
+
+    // Reset photo B
+    s.execute("library.select", &json!({"ids": [photo_b.0]})).unwrap();
+    s.execute("develop.reset", &json!({})).unwrap();
+    assert_eq!(s.develop_of(photo_b).unwrap().light.exposure, 0.0);
+
+    // 4. Omitted groups preserves default behavior (all copied groups pasted)
+    s.execute("develop.paste", &json!({"ids": [photo_b.0]})).unwrap();
+    let dev_after_omitted = (*s.develop_of(photo_b).unwrap()).clone();
+    assert_eq!(dev_after_omitted.light.exposure, 1.0);
+    assert_eq!(dev_after_omitted.color.vibrance, 30.0);
+
+    // Reset photo B
+    s.execute("develop.reset", &json!({})).unwrap();
+
+    // 5. Explicit null behaves as omitted
+    s.execute("develop.paste", &json!({"ids": [photo_b.0], "groups": null})).unwrap();
+    let dev_after_null = (*s.develop_of(photo_b).unwrap()).clone();
+    assert_eq!(dev_after_null.light.exposure, 1.0);
+    assert_eq!(dev_after_null.color.vibrance, 30.0);
+}
+
+#[test]
+fn develop_sync_validates_groups_and_rejects_malformed_with_zero_mutations() {
+    let mut s = demo();
+    let ids: Vec<_> = s.visible().iter().copied().take(2).collect();
+    let photo_a = ids[0];
+    let photo_b = ids[1];
+
+    // Setup: Photo A has exposure = 1.0, vibrance = 30.0
+    s.execute("library.select", &json!({"ids": [photo_a.0]})).unwrap();
+    s.execute("develop.set", &json!({"values": {"light.exposure": 1.0, "color.vibrance": 30.0}})).unwrap();
+
+    // Select Photo A (active) and Photo B
+    s.execute("library.select", &json!({"ids": [photo_a.0, photo_b.0], "active": photo_a.0})).unwrap();
+
+    let initial_b_dev = (*s.develop_of(photo_b).unwrap()).clone();
+    let initial_b_hist_len = s.catalog.photo(photo_b).unwrap().history.len();
+
+    // 1. Invalid group names are rejected
+    for invalid_group in ["bogusGroup", "LIGHT", "WhiteBalance", "invalid_name"] {
+        let err = s.execute("develop.sync", &json!({"groups": [invalid_group]})).unwrap_err();
+        assert!(matches!(err, crate::EngineError::BadParams { .. }));
+        assert_eq!(*s.develop_of(photo_b).unwrap(), initial_b_dev);
+        assert_eq!(s.catalog.photo(photo_b).unwrap().history.len(), initial_b_hist_len);
+    }
+
+    // 2. Incorrect JSON types are rejected
+    for invalid_param in [
+        json!("light"),             // string instead of sequence
+        json!(100),                 // number
+        json!(false),               // boolean
+        json!({"groups": "light"}), // object
+        json!([999]),               // array of non-string
+        json!(["color", false]),    // mixed array with invalid type
+        json!([null]),              // array with null
+    ] {
+        let err = s.execute("develop.sync", &json!({"groups": invalid_param})).unwrap_err();
+        assert!(matches!(err, crate::EngineError::BadParams { .. }));
+        assert_eq!(*s.develop_of(photo_b).unwrap(), initial_b_dev);
+        assert_eq!(s.catalog.photo(photo_b).unwrap().history.len(), initial_b_hist_len);
+    }
+
+    // 3. Valid groups remain supported: syncing only "light" does not sync "color"
+    s.execute("develop.sync", &json!({"groups": ["light"]})).unwrap();
+    let dev_after_light = (*s.develop_of(photo_b).unwrap()).clone();
+    assert_eq!(dev_after_light.light.exposure, 1.0);
+    assert_eq!(dev_after_light.color.vibrance, initial_b_dev.color.vibrance);
+
+    // Reset photo B
+    s.execute("library.select", &json!({"ids": [photo_b.0]})).unwrap();
+    s.execute("develop.reset", &json!({})).unwrap();
+    assert_eq!(s.develop_of(photo_b).unwrap().light.exposure, 0.0);
+
+    // Reselect Photo A (active) and Photo B
+    s.execute("library.select", &json!({"ids": [photo_a.0, photo_b.0], "active": photo_a.0})).unwrap();
+
+    // 4. Omitted groups preserves default behavior (all default copy groups synced)
+    s.execute("develop.sync", &json!({})).unwrap();
+    let dev_after_omitted = (*s.develop_of(photo_b).unwrap()).clone();
+    assert_eq!(dev_after_omitted.light.exposure, 1.0);
+    assert_eq!(dev_after_omitted.color.vibrance, 30.0);
+
+    // Reset photo B
+    s.execute("library.select", &json!({"ids": [photo_b.0]})).unwrap();
+    s.execute("develop.reset", &json!({})).unwrap();
+
+    // Reselect Photo A (active) and Photo B
+    s.execute("library.select", &json!({"ids": [photo_a.0, photo_b.0], "active": photo_a.0})).unwrap();
+
+    // 5. Explicit null behaves as omitted
+    s.execute("develop.sync", &json!({"groups": null})).unwrap();
+    let dev_after_null = (*s.develop_of(photo_b).unwrap()).clone();
+    assert_eq!(dev_after_null.light.exposure, 1.0);
+    assert_eq!(dev_after_null.color.vibrance, 30.0);
+}
+
+#[test]
+fn develop_copy_and_paste_previous_validate_groups() {
+    let mut s = demo();
+    let ids: Vec<_> = s.visible().iter().copied().take(2).collect();
+    let photo_a = ids[0];
+    let photo_b = ids[1];
+
+    s.execute("library.select", &json!({"ids": [photo_a.0]})).unwrap();
+    s.execute("develop.set", &json!({"values": {"light.exposure": 1.5}})).unwrap();
+
+    // develop.copy rejects invalid group
+    let copy_err = s.execute("develop.copy", &json!({"groups": ["notAGroup"]})).unwrap_err();
+    assert!(matches!(copy_err, crate::EngineError::BadParams { .. }));
+
+    // develop.copy accepts valid groups
+    s.execute("develop.copy", &json!({"groups": ["light"]})).unwrap();
+
+    // Switch active photo to photo_b so photo_a becomes previous_active
+    s.execute("library.select", &json!({"ids": [photo_b.0]})).unwrap();
+
+    let initial_b_dev = (*s.develop_of(photo_b).unwrap()).clone();
+
+    // develop.pastePrevious rejects invalid group
+    let prev_err = s.execute("develop.pastePrevious", &json!({"groups": ["badGroup"]})).unwrap_err();
+    assert!(matches!(prev_err, crate::EngineError::BadParams { .. }));
+    assert_eq!(*s.develop_of(photo_b).unwrap(), initial_b_dev);
+
+    // develop.pastePrevious accepts valid group
+    s.execute("develop.pastePrevious", &json!({"groups": ["light"]})).unwrap();
+    assert_eq!(s.develop_of(photo_b).unwrap().light.exposure, 1.5);
+}
+
+#[test]
+fn presets_validate_groups_on_create_and_update() {
+    let mut s = demo();
+    s.execute("develop.set", &json!({"values": {"light.exposure": 1.0, "color.vibrance": 25}})).unwrap();
+    let initial_preset_count = s.presets.len();
+
+    // 1. preset.create rejects invalid group names and incorrect JSON types without creating a preset
+    for invalid_groups in [json!(["bogusGroup"]), json!("light"), json!(123), json!([true]), json!(["light", 99])] {
+        let err = s.execute("preset.create", &json!({"name": "Test", "groups": invalid_groups})).unwrap_err();
+        assert!(matches!(err, crate::EngineError::BadParams { .. }));
+        assert_eq!(s.presets.len(), initial_preset_count);
+    }
+
+    // 2. preset.create with valid groups creates a preset with only those groups
+    let res = s.execute("preset.create", &json!({"name": "ValidPreset", "groups": ["light"]})).unwrap();
+    let pid = res["id"].as_str().unwrap().to_string();
+    assert_eq!(s.presets.len(), initial_preset_count + 1);
+    let p = s.presets.iter().find(|p| p.id == pid).unwrap();
+    assert!(p.settings.get("light").is_some());
+    assert!(p.settings.get("color").is_none());
+
+    // 3. preset.create with omitted groups uses default copy groups
+    let res_omitted = s.execute("preset.create", &json!({"name": "DefaultPreset"})).unwrap();
+    let pid_omitted = res_omitted["id"].as_str().unwrap().to_string();
+    let p_omitted = s.presets.iter().find(|p| p.id == pid_omitted).unwrap();
+    assert!(p_omitted.settings.get("light").is_some());
+    assert!(p_omitted.settings.get("color").is_some());
+
+    // Change develop settings
+    s.execute("develop.set", &json!({"values": {"light.exposure": 2.0, "color.vibrance": 50}})).unwrap();
+
+    let preset_before_update = s.presets.iter().find(|p| p.id == pid).unwrap().clone();
+
+    // 4. preset.update rejects invalid group names and incorrect JSON types without modifying the preset
+    for invalid_groups in [json!(["bogusGroup"]), json!("color"), json!(999), json!([false]), json!(["color", "bad"])] {
+        let err = s.execute("preset.update", &json!({"id": pid, "groups": invalid_groups})).unwrap_err();
+        assert!(matches!(err, crate::EngineError::BadParams { .. }));
+        let current = s.presets.iter().find(|p| p.id == pid).unwrap();
+        assert_eq!(*current, preset_before_update);
+    }
+
+    // 5. preset.update with valid groups updates specified groups
+    s.execute("preset.update", &json!({"id": pid, "groups": ["light", "color"]})).unwrap();
+    let p_after_valid = s.presets.iter().find(|p| p.id == pid).unwrap();
+    assert_eq!(p_after_valid.settings["light"]["exposure"], 2.0);
+    assert_eq!(p_after_valid.settings["color"]["vibrance"], 50.0);
+
+    // 6. preset.update with omitted groups updates existing preset keys
+    s.execute("develop.set", &json!({"values": {"light.exposure": -1.0, "color.vibrance": -20}})).unwrap();
+    s.execute("preset.update", &json!({"id": pid})).unwrap();
+    let p_after_omitted = s.presets.iter().find(|p| p.id == pid).unwrap();
+    assert_eq!(p_after_omitted.settings["light"]["exposure"], -1.0);
+    assert_eq!(p_after_omitted.settings["color"]["vibrance"], -20.0);
+}
+
+/// A Heal or Remove spot whose size (from a sidecar, which isn't held to the slider's range) is far past the photo
+/// made the render's radius infinite: its heal blur and the source it reads went with it, overflowing the blur's box
+/// radii and the bilinear sampler (issue #1519). Such spots render, quickly, as a spot over the whole frame.
+#[test]
+fn oversized_spots_render() {
+    use lightcraft_develop::{Spot, SpotMode};
+    for size in [10.0, 1e30, f64::MAX, f64::INFINITY, f64::NAN] {
+        for mode in [SpotMode::Heal, SpotMode::Remove, SpotMode::Clone] {
+            let mut s = demo();
+            let id = s.active().unwrap();
+            let mut dd = (*s.develop_of(id).unwrap_or_default()).clone();
+            dd.spots.push(Spot { mode, points: vec![lightcraft_geom::Point::new(0.5, 0.5)], size, ..Default::default() });
+            s.set_develop(id, dd, "Remove").unwrap();
+            let t = std::time::Instant::now();
+            let r = s.render_now(id, 300, 200).unwrap();
+            assert!(r.image.width >= 1 && r.image.height >= 1, "{size} {mode:?}");
+            assert!(t.elapsed().as_secs_f64() < 60.0, "{size} {mode:?}: {:?}", t.elapsed());
+        }
+    }
 }

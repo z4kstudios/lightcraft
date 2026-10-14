@@ -27,6 +27,11 @@ homography (the simplest model that explains ≥ 97 % of the matches). Exposure 
 Radiance is a weighted mean in linear light, weight `k · (1 − smoothstep(0.8·clip, 0.96·clip, max
 channel))`. Deghost: a per-pixel consistency test against the reference radiance (with a noise
 floor), dilated and feathered masks; the union is the deghost overlay. Output: 16-bit float DNG.
+Lens corrections: frames are merged uncorrected, and the DNG's `OpcodeList3` carries the reference frame's
+(`WarpRectilinear`, `WarpRectilinear2`, `FixVignetteRadial`: a DNG's own, or a camera's correction a raw reader
+converts, e.g. Sony, Panasonic), re-expressed for its default crop (`Opcode::cropped`). So Optics ▸ Enable Lens
+Corrections works on the result as on the sources; a vertical bracket keeps its pixels unturned and its
+corrections.
 
 **Panorama** (`pano/`): MOPS-style features, pairwise RANSAC homographies with Brown & Lowe's
 verification, focal from homographies (or EXIF 35 mm), rotations chained along a maximum spanning
@@ -54,7 +59,9 @@ scale in `BaselineExposure`; raw sources keep their DNG colour tags (camera RGB)
 ## Limits (known gaps)
 
 - No lens-distortion model in the panorama bundle adjustment (rectilinear lenses assumed); no
-  360° wrap-around; flat (translating-camera) scans are fitted with the rotation model.
+  360° wrap-around; flat (translating-camera) scans are fitted with the rotation model. Panoramas and HDR
+  panoramas carry no lens corrections, nor does an HDR whose frames don't share an orientation (they are turned
+  before merging).
 - No camera response calibration for JPEG brackets (sRGB decoding is taken as linear light).
 - Boundary Warp is a separable stretch, not a content-preserving mesh warp; Fill Edges is diffusion,
   not patch synthesis.

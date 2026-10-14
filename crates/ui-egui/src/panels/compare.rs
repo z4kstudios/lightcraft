@@ -97,6 +97,31 @@ pub fn set_photo(app: &mut LightcraftApp, id: PhotoId, side: Option<&str>) -> Re
     Ok(json!({"select": a.0, "candidate": b.0}))
 }
 
+/// A ⌘/Ctrl-click (`range: false`, toggles the photo) or Shift-click (`range: true`, extends
+/// from the active photo) on the filmstrip in Compare: the selection changes as it does in the
+/// grid, but the two photos shown stay selected and the active one stays active, so the photo the
+/// rating keys act on is still on screen (#744). A plain click is [`set_photo`].
+pub fn select_with_modifier(app: &mut LightcraftApp, id: PhotoId, range: bool) -> Result<Value, String> {
+    if app.session.catalog.photo(id).is_none_or(|p| p.deleted) {
+        return Err(format!("no photo {}", id.0));
+    }
+    let (sel, cand) = compare_pair(app).ok_or("nothing to compare")?;
+    let mut next = app.session.selection.clone();
+    if range {
+        next.extend_to(id, &app.session.visible_cloned());
+    } else {
+        next.toggle(id);
+    }
+    for shown in [sel, cand] {
+        if !next.contains(shown) {
+            next.ids.push(shown);
+        }
+    }
+    let active = app.session.selection.active.filter(|a| next.contains(*a)).unwrap_or(cand);
+    let ids: Vec<u64> = next.ids.iter().map(|p| p.0).collect();
+    app.session.execute("library.select", &json!({"ids": ids, "active": active.0})).map_err(|e| e.to_string())
+}
+
 /// The candidate becomes the select; the next photo becomes the candidate.
 pub fn make_select(app: &mut LightcraftApp) -> Result<Value, String> {
     let (_, b) = compare_pair(app).ok_or("nothing to compare")?;
@@ -188,12 +213,16 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
     if matches!(app.ui.view, ViewMode::Compare | ViewMode::Reference) {
         if super::detail::navigate_gesture(app, ui, &resp, img_area, img, native) {
             img = super::detail::fit_rect(img_area, aspect, app.ui.zoom, native, ppp, app.ui.pan);
+            // a pinch changes the zoom every frame: no new windows until it is quiet
+            app.compare_hold_until = ui.input(|i| i.time) + crate::region::HOLD_SECS;
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(crate::region::HOLD_SECS));
         } else if resp.dragged() {
             super::detail::pan_image(app, img_area, img, resp.drag_delta());
         }
     }
-    let want = (img.width().max(img.height()).min(img_area.width().max(img_area.height()) * 4.0) * ppp)
-        .min(2560.0_f32.min(super::detail::texture_side(ui.ctx()) as f32)) as usize;
+    let texture_side = super::detail::texture_side(ui.ctx());
+    let want =
+        (img.width().max(img.height()).min(img_area.width().max(img_area.height()) * 4.0) * ppp).min(2560.0_f32.min(texture_side as f32)) as usize;
     let (rw, rh) = if aspect >= 1.0 { (want, (want as f32 / aspect) as usize) } else { ((want as f32 * aspect) as usize, want) };
     if let Some(job) = app.session.render_job(id, rw.max(8), rh.max(8), false, true) {
         app.renderer.request(slot, job, 60);
@@ -201,6 +230,35 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
     if let Some(job) = app.session.thumb_job(id, 256) {
         app.renderer.request(Slot::Thumb(id), job, 30);
     }
+    // zoomed past what that render holds (1:1 to check focus): the part on screen as a window, as
+    // in the loupe. Compare and Reference only; Survey tiles are fit views.
+    let pane = match slot {
+        Slot::Compare(i) if i < WINDOW_PANES && matches!(app.ui.view, ViewMode::Compare | ViewMode::Reference) => Some(i),
+        _ => None,
+    };
+    let shown_aspect = app.renderer.textures.get(&slot).filter(|x| x.photo == id).map(|t| t.size[0].max(1) as f32 / t.size[1].max(1) as f32);
+    let window = pane.and_then(|i| {
+        let tile = TileView {
+            pane: i,
+            id,
+            img,
+            visible: img_area,
+            aspect,
+            native_long: native[0].max(native[1]),
+            whole_edge: want,
+            ppp,
+            texture_side,
+            now: ui.input(|i| i.time),
+        };
+        let plain = shown_aspect.is_none_or(|a| crate::region::same_aspect(a, aspect));
+        let view = if plain { request_window(app, &tile) } else { None };
+        app.compare_windows[i as usize] = view;
+        if view.is_none() {
+            app.compare_tiles.retain(|(p, _), _| *p != i);
+            app.renderer.release(Slot::CompareRegion(i));
+        }
+        view.map(|_| i)
+    });
     let p = ui.painter_at(img_area);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     let mut display = img;
@@ -208,6 +266,9 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
         let texture_aspect = tex.size[0].max(1) as f32 / tex.size[1].max(1) as f32;
         display = super::detail::fit_rect(img_area, texture_aspect, zoom, native, ppp, app.ui.pan);
         p.image(tex.tex.id(), display, uv, Color32::WHITE);
+        if let Some(i) = window {
+            draw_window(&p, app, i, id, photo.develop.hash64(), display);
+        }
     } else if let Some(tex) = app.renderer.textures.get(&Slot::Thumb(id)) {
         let texture_aspect = tex.size[0].max(1) as f32 / tex.size[1].max(1) as f32;
         display = super::detail::fit_rect(img_area, texture_aspect, zoom, native, ppp, app.ui.pan);
@@ -222,6 +283,36 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
     if active {
         p.rect_stroke(display.intersect(img_area.shrink(1.0)), 0.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
     }
+    // Compare and Reference are where sharpness is judged: as in the loupe, say when what is on
+    // screen isn't the render on its way (a thumbnail, the last render after an edit, a magnified
+    // frame under its window), or when that render failed
+    if matches!(app.ui.view, ViewMode::Compare | ViewMode::Reference) {
+        let i = slot_index(slot);
+        let r = &app.renderer;
+        let mine = |s: Slot| r.textures.get(&s).filter(|t| t.photo == id).map(|t| t.key);
+        let waits = |s: Slot| r.is_pending(s) && !r.retrying(s);
+        // a slider drag on this photo: Compare has no drafts, so its render can't keep up until the drag ends
+        let dragging = app.session.interaction.is_some() && app.session.selection.active == Some(id);
+        let coming = (waits(slot) && !dragging) || (window.is_some() && waits(Slot::CompareRegion(i)));
+        let keys = [mine(slot), mine(Slot::CompareRegion(i)), None, None];
+        let now = ui.input(|i| i.time);
+        // (the wait belongs to the photo in the pane: one moved in starts its own)
+        let rendering = ui.ctx().data_mut(|d| {
+            let (photo, wait) = d.get_temp_mut_or(egui::Id::new(("compare-rendering", i)), (id, None));
+            if *photo != id {
+                (*photo, *wait) = (id, None);
+            }
+            super::detail::rendering_overdue(wait, keys, coming, now)
+        });
+        let failed = (!rendering && mine(slot).is_none() && (!r.is_pending(slot) || r.retrying(slot))).then(|| r.failure_of(slot, id)).flatten();
+        let over = display.intersect(img_area);
+        let over = if over.is_positive() { over } else { img_area };
+        if let Some(e) = failed {
+            super::detail::failed_pill(ui, app, &photo, img_area, over, None, &format!("compare:renderFailed:{i}"), e);
+        } else if rendering {
+            super::detail::loupe_pill(ui, img_area, over, None, &format!("compare:rendering:{i}"), crate::i18n::tr("Rendering…"), false);
+        }
+    }
     // caption: label · file name · stars · flag
     // caption right under the image (at the bottom when zoomed in)
     let cap_top = (display.bottom() + 2.0).min(img_area.bottom());
@@ -229,7 +320,7 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
     let pt = ui.painter();
     let mut x = cap.left() + 4.0;
     if !label.is_empty() {
-        let g = pt.layout_no_wrap(label.to_string(), t.semibold(12.0), if active { t.text } else { t.text_label });
+        let g = pt.layout_no_wrap(crate::i18n::tr(label).to_string(), t.semibold(12.0), if active { t.text } else { t.text_label });
         pt.galley(pos2(x, cap.center().y - g.size().y / 2.0), g.clone(), t.text);
         x += g.size().x + 10.0;
     }
@@ -256,6 +347,116 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
     }
     register(ui.ctx(), format!("cull:{}", id.0), display);
     (display, resp)
+}
+
+/// Panes that get window renders: Compare's Select and Candidate, Reference's two sides.
+const WINDOW_PANES: u8 = 2;
+
+/// One pane of Compare or Reference, as [`request_window`] needs it.
+struct TileView {
+    pane: u8,
+    id: PhotoId,
+    /// The rect the photo is drawn in (the zoomed frame).
+    img: Rect,
+    /// The area whose pixels are on screen.
+    visible: Rect,
+    aspect: f32,
+    /// The photo's own long edge as shown.
+    native_long: usize,
+    /// Long edge of the pane's whole-frame render.
+    whole_edge: usize,
+    ppp: f32,
+    texture_side: usize,
+    /// The frame's time (s).
+    now: f64,
+}
+
+/// Ask for the window of a pane's frame that is on screen, once the view is zoomed past what the
+/// pane's whole-frame render holds (issue #323): cut from a frame of at most the photo's own pixels
+/// (beyond 100 % the GPU magnifies it) and drawn over the whole-frame render. Remembers it so its
+/// texture can be drawn where it belongs. `None`: no window is wanted (or possible): the pane shows
+/// its whole-frame render alone, as before windows.
+///
+/// While a pinch or scroll runs, and while the photo is being edited (a slider drag in Reference
+/// view), the window there is stays: a new one per frame would render the photo's own pixels each
+/// time. It is drawn magnified or with the old value until the gesture is quiet.
+fn request_window(app: &mut LightcraftApp, v: &TileView) -> Option<crate::region::RegionView> {
+    let drawn_long = v.img.width().max(v.img.height()) * v.ppp;
+    let frame_edge = app.ui.settings.window_frame_edge(drawn_long, v.native_long);
+    if frame_edge as f32 <= v.whole_edge as f32 * crate::region::WINDOW_RATIO {
+        return None;
+    }
+    let editing = app.session.interaction.is_some() && app.session.active() == Some(v.id);
+    if app.compare_hold_until > v.now || editing {
+        return app.compare_windows[v.pane as usize].filter(|w| w.photo == v.id);
+    }
+    let (fw, fh) =
+        if v.aspect >= 1.0 { (frame_edge as f32, frame_edge as f32 / v.aspect) } else { (frame_edge as f32 * v.aspect, frame_edge as f32) };
+    let (fw, fh) = (fw.round().max(1.0) as usize, fh.round().max(1.0) as usize);
+    // what is on screen, in pixels of the window's frame (the drawn frame, scaled)
+    let to_px = v.ppp * frame_edge as f32 / drawn_long.max(1.0);
+    let visible = (
+        to_px * (v.visible.left() - v.img.left()),
+        to_px * (v.visible.top() - v.img.top()),
+        to_px * (v.visible.right() - v.img.left()),
+        to_px * (v.visible.bottom() - v.img.top()),
+    );
+    let win = crate::region::window_for(fw, fh, visible, crate::region::max_span(v.texture_side))?;
+    // refused: what the window reads (a spot's source, an Auto Mask stroke) is too far for one
+    // render; the pane keeps its whole-frame render
+    let job = app.session.region_job(v.id, fw, fh, win, true)?;
+    // keyed as the renderer keys the texture (a display profile changes the key)
+    let job = app.renderer.job_for(Slot::CompareRegion(v.pane), job);
+    let look = job.settings.hash64();
+    let view = crate::region::RegionView { photo: v.id, before: false, key: job.key, full: (fw, fh), window: win, settings: look };
+    // windows of other photos, looks and zooms of this pane can't be drawn any more
+    app.compare_tiles.retain(|(p, _), t| *p != v.pane || t.is_current(v.id, (fw, fh), look, false));
+    app.compare_tiles.insert((v.pane, job.key), view);
+    // after both panes' whole-frame renders (60): those are what a step to the next photo shows first
+    app.renderer.request(Slot::CompareRegion(v.pane), job, 58);
+    Some(view)
+}
+
+/// Draw pane `pane`'s window texture over its whole-frame render (`display`), if it shows this
+/// photo with its current look (any look of it while it is being edited). A window made at another
+/// zoom is drawn at its place in the frame, magnified or shrunk, until the new one arrives.
+fn draw_window(p: &egui::Painter, app: &LightcraftApp, pane: u8, id: PhotoId, look: u64, display: Rect) {
+    let Some(tex) = app.renderer.textures.get(&Slot::CompareRegion(pane)).filter(|t| t.photo == id) else { return };
+    let editing = app.session.interaction.is_some() && app.session.active() == Some(id);
+    let Some(tile) = app.compare_tiles.get(&(pane, tex.key)).filter(|t| t.photo == id && (editing || t.settings == look)) else {
+        return;
+    };
+    let (fw, fh) = (tile.full.0.max(1) as f32, tile.full.1.max(1) as f32);
+    let at = display.min + vec2(tile.window.x as f32 / fw * display.width(), tile.window.y as f32 / fh * display.height());
+    let dst = Rect::from_min_size(at, vec2(tile.window.w as f32 / fw * display.width(), tile.window.h as f32 / fh * display.height()));
+    p.image(tex.tex.id(), dst, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+}
+
+/// Per frame, before the central view is shown: Compare and Reference keep two photos' originals
+/// decoded (their windows are cut from both); other views keep one and free the panes' windows.
+/// The Detail view's photo keeps its original even over the memory budget (a zoomed 64 MP raw);
+/// other views free the Detail view's windows (while one is shown the GPU copy of its original stays).
+pub fn prepare(app: &mut LightcraftApp) {
+    let shown = if app.ui.view == ViewMode::Detail { app.session.active() } else { None };
+    app.session.media.set_on_screen(shown);
+    if app.ui.view != ViewMode::Detail {
+        app.region_view = None;
+        app.region_before_view = None;
+        app.region_tiles.clear();
+        app.renderer.release(Slot::Region);
+        app.renderer.release(Slot::RegionBefore);
+    }
+    if matches!(app.ui.view, ViewMode::Compare | ViewMode::Reference) {
+        app.session.media.set_full_capacity(WINDOW_PANES as usize);
+        return;
+    }
+    app.session.media.set_full_capacity(1);
+    for i in 0..WINDOW_PANES {
+        if app.compare_windows[i as usize].take().is_some() || app.renderer.textures.contains_key(&Slot::CompareRegion(i)) {
+            app.renderer.release(Slot::CompareRegion(i));
+        }
+    }
+    app.compare_tiles.clear();
 }
 
 fn slot_index(s: Slot) -> u8 {

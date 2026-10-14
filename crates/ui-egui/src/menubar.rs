@@ -45,7 +45,10 @@ impl MenuNode {
 
 /// User-defined names in parameterized menus are data, not message keys.
 pub fn display_item_label<'a>(id: &str, params: &Value, label: &'a str) -> &'a str {
-    if matches!(id, "metadata.applyPreset" | "album.addPhotos" | "label.applySet") || (id == "app.export" && params.get("preset").is_some()) {
+    if matches!(id, "metadata.applyPreset" | "album.addPhotos" | "label.applySet")
+        || (id == "app.export" && params.get("preset").is_some())
+        || (id == "app.openLibrary" && params.get("path").is_some())
+    {
         label
     } else {
         crate::i18n::tr(label)
@@ -66,7 +69,9 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "file.addFolder",
             "@Import from Device",
             "---",
+            "app.newLibrary",
             "app.openLibrary",
+            "@Open Recent Library",
             "file.backupLibrary",
             "file.restoreLibrary",
             "---",
@@ -124,14 +129,17 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "view.people",
             "---",
             "view.leftPanel",
+            "@Sidebar Sections",
             "view.photoCounts",
             "view.faceBoxes",
             "view.filmstrip",
             "view.histogram",
             "view.navigator",
             "view.infoOverlay",
+            "@Appearance",
             "---",
             "view.fullScreenPreview",
+            "view.lightsOut",
             "view.enterFullScreen",
             "---",
             "view.showOriginal",
@@ -149,6 +157,7 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "view.visualizeHdr",
             "view.softProof",
             "view.maskOverlay",
+            "view.maskOverlayAll",
             "view.maskOverlayMode",
             "view.maskOverlayColor",
             "view.maskPins",
@@ -312,6 +321,7 @@ pub fn checked(app: &LightcraftApp, id: &str) -> Option<bool> {
         "view.visualizeHdr" => Some(u.hdr_visualize),
         "view.softProof" => Some(u.soft_proof),
         "view.maskOverlay" => Some(u.mask_overlay),
+        "view.maskOverlayAll" => Some(u.mask_overlay_all),
         "view.maskPins" => Some(u.mask_pins),
         "view.showOriginal" => Some(u.before_after == crate::state::BeforeAfter::Original),
         "view.beforeAfter" => Some(u.before_after == crate::state::BeforeAfter::SideBySide),
@@ -320,6 +330,7 @@ pub fn checked(app: &LightcraftApp, id: &str) -> Option<bool> {
         "view.filterBar" => Some(u.filter_bar),
         "view.navigator" => Some(u.navigator),
         "view.fullScreenPreview" => Some(u.fullscreen),
+        "view.lightsOut" => Some(u.lights_out != crate::state::LightsOut::On),
         "view.enterFullScreen" => Some(app.window_is_fullscreen),
         "panel.edit" => panel(RightPanel::Edit),
         "panel.profiles" => panel(RightPanel::Profiles),
@@ -460,6 +471,42 @@ fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>> {
             v.push(item("dialog.labelNames", Value::Null, "Edit Label Names…", None, true, None));
             v
         }
+        "Sidebar Sections" => {
+            // one checkable item per section, in the order the sidebar lists them
+            let layout = &app.ui.sidebar;
+            let mut v: Vec<MenuNode> = layout
+                .sections()
+                .iter()
+                .filter(|s| s.id.available())
+                .map(|s| item("view.sidebarSection", json!({"section": s.id.id()}), s.id.title(), None, true, Some(!s.hidden)))
+                .collect();
+            v.push(MenuNode::Separator);
+            v.push(item("view.sidebarReset", Value::Null, "Reset Sidebar Sections", None, !layout.is_default(), None));
+            v
+        }
+        "Appearance" => {
+            use crate::state::AppearanceMode;
+            use crate::theme::ThemeKind;
+            let s = &app.ui.settings;
+            let mut v: Vec<MenuNode> = [
+                ("auto", "Sync with System", AppearanceMode::Auto),
+                ("light", "Light Mode", AppearanceMode::Light),
+                ("dark", "Dark Mode", AppearanceMode::Dark),
+            ]
+            .into_iter()
+            .map(|(mode, label, m)| item("view.appearance", json!({"mode": mode}), label, None, true, Some(s.appearance_mode == m)))
+            .collect();
+            v.push(item("view.appearance", Value::Null, "Next Appearance Mode", None, true, None));
+            // the saved theme of each family is checked
+            for group in [[ThemeKind::Charcoal, ThemeKind::Midnight], [ThemeKind::Silver, ThemeKind::Paper]] {
+                v.push(MenuNode::Separator);
+                for k in group {
+                    let on = if k.is_dark() { s.dark_theme.kind() == k } else { s.light_theme.kind() == k };
+                    v.push(item("view.theme", json!({"theme": k.id()}), k.label(), None, true, Some(on)));
+                }
+            }
+            v
+        }
         "Grid Info" => ["filename", "exposure", "date"]
             .into_iter()
             .zip(["File Name", "Exposure (shutter · aperture · ISO)", "Capture Date"])
@@ -509,6 +556,30 @@ fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>> {
                 ("No Date Groups", GroupBy::None, "none"),
             ];
             v.extend(groups.into_iter().map(|(label, g, k)| item("library.sort", json!({"group": k}), label, None, true, Some(cur.group == g))));
+            v
+        }
+        "Open Recent Library" => {
+            let can = crate::panels::settings::can_switch_library(app).is_ok();
+            let open = app.session.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
+            let mut v: Vec<MenuNode> = app
+                .ui
+                .settings
+                .recent_libraries
+                .iter()
+                .map(|r| {
+                    let d = std::path::Path::new(r);
+                    // a missing library (moved, drive disconnected) is shown greyed out
+                    let label =
+                        format!("{} — {}", crate::panels::settings::library_name(d), d.parent().map(|p| p.display().to_string()).unwrap_or_default());
+                    item("app.openLibrary", json!({"path": r}), label, None, can && d.is_dir(), Some(open.as_deref() == Some(d)))
+                })
+                .collect();
+            if v.is_empty() {
+                v.push(item("app.clearRecentLibraries", Value::Null, "No Recent Libraries", None, false, None));
+            } else {
+                v.push(MenuNode::Separator);
+                v.push(item("app.clearRecentLibraries", Value::Null, "Clear Recent Libraries", None, true, None));
+            }
             v
         }
         "Import from Device" => {
@@ -573,15 +644,23 @@ fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>> {
             v
         }
         "Add to Album" => {
-            let sel = !app.session.selection.ids.is_empty() || has;
-            let mut albums: Vec<_> = app.session.catalog.albums().filter(|a| !a.folder && !a.is_smart()).map(|a| (a.name.clone(), a.id.0)).collect();
-            albums.sort_by_key(|(n, _)| n.to_lowercase());
-            let mut v: Vec<MenuNode> =
-                albums.into_iter().map(|(name, id)| item("album.addPhotos", json!({"id": id}), name, None, sel, None)).collect();
-            if !v.is_empty() {
+            let targets = app.session.targets(&Value::Null);
+            let sel = !targets.is_empty();
+            // albums hold library photos (issue #684): a Local-only selection is told what to do first
+            let local_only = crate::panels::grid::local_only(app, &targets);
+            let mut v: Vec<MenuNode> = vec![];
+            if local_only {
+                v.push(item("photo.addToLibrary", Value::Null, crate::i18n::tr("Add to My Photos First"), None, false, None));
                 v.push(MenuNode::Separator);
             }
-            v.push(item("dialog.newAlbum", Value::Null, "New Album…", None, true, None));
+            let mut albums: Vec<_> = app.session.catalog.albums().filter(|a| !a.folder && !a.is_smart()).map(|a| (a.name.clone(), a.id.0)).collect();
+            albums.sort_by_key(|(n, _)| n.to_lowercase());
+            let any = !albums.is_empty();
+            v.extend(albums.into_iter().map(|(name, id)| item("album.addPhotos", json!({"id": id}), name, None, sel && !local_only, None)));
+            if any {
+                v.push(MenuNode::Separator);
+            }
+            v.push(item("dialog.newAlbum", Value::Null, "New Album…", None, !local_only, None));
             v
         }
         _ => return None,
@@ -1207,7 +1286,168 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #1528: `file.findMissing` with `wait: true` must propagate folder validation and search
+    /// failures as errors instead of returning `Ok(null)`.
     #[test]
+    fn find_missing_waited_invalid_folder_returns_error_with_zero_mutations() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-missing-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dummy = dir.join("dummy.png");
+        let img = lightcraft_raster::Rgba8::from_fn(8, 8, |_, _| [10, 20, 30, 255]);
+        let o = lightcraft_engine::export::ExportOptions { format: lightcraft_engine::export::ExportFormat::Png, ..Default::default() };
+        std::fs::write(&dummy, lightcraft_engine::export::encode_image(&img, &o).unwrap()).unwrap();
+
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), Default::default());
+        app.session.execute("library.import", &json!({"paths": [dummy.to_string_lossy()]})).unwrap();
+        // remove the file on disk so the photo is missing
+        std::fs::remove_file(&dummy).unwrap();
+        let id = app.session.catalog.photos().next().unwrap().id;
+        let original_path = match &app.session.catalog.photo(id).unwrap().source {
+            lightcraft_catalog::Source::File { path } => path.clone(),
+            _ => panic!("expected file source"),
+        };
+        let undo_count_before = app.session.undo.len();
+
+        // 1. Point at a nonexistent directory
+        let bad_dir = dir.join("nonexistent_subdir");
+        let err = run_item(&mut app, "file.findMissing", json!({"folder": bad_dir.to_string_lossy(), "wait": true})).unwrap_err();
+        assert!(err.contains("not a folder"), "expected 'not a folder' error, got: {err}");
+        assert!(app.ui.toast.as_ref().map(|t| t.0.contains("not a folder")).unwrap_or(false), "toast should reflect failure");
+        assert!(app.ui.last_find_missing.is_none(), "last_find_missing must remain None on failure");
+
+        // 2. Invalid timeout parameters are rejected cleanly
+        let err = run_item(&mut app, "file.findMissing", json!({"folder": dir.to_string_lossy(), "wait": true, "timeout": -1.0})).unwrap_err();
+        assert!(err.contains("non-negative number of seconds"), "{err}");
+        let err = run_item(&mut app, "file.findMissing", json!({"folder": dir.to_string_lossy(), "wait": true, "timeout": "invalid"})).unwrap_err();
+        assert!(err.contains("number of seconds"), "{err}");
+        let err = run_item(&mut app, "file.findMissing", json!({"folder": dir.to_string_lossy(), "wait": true, "timeout": 1e300})).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+
+        // Catalog and photo path must not have been mutated
+        assert_eq!(app.session.undo.len(), undo_count_before, "no undo steps added on failed search");
+        let path_after = match &app.session.catalog.photo(id).unwrap().source {
+            lightcraft_catalog::Source::File { path } => path.clone(),
+            _ => panic!("expected file source"),
+        };
+        assert_eq!(path_after, original_path, "missing photo path must not change on failure");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1528: `file.findMissing` with `wait: true` returns structured results on success,
+    /// and background mode (`wait: false` or omitted) continues returning `{"background": true}`.
+    #[test]
+    fn find_missing_waited_structured_results_and_background_mode() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-missing-bg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("orig")).unwrap();
+        std::fs::create_dir_all(dir.join("found")).unwrap();
+        let img = lightcraft_raster::Rgba8::from_fn(8, 8, |_, _| [10, 20, 30, 255]);
+        let o = lightcraft_engine::export::ExportOptions { format: lightcraft_engine::export::ExportFormat::Png, ..Default::default() };
+        std::fs::write(dir.join("orig/pic.png"), lightcraft_engine::export::encode_image(&img, &o).unwrap()).unwrap();
+
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), Default::default());
+        app.session.execute("library.import", &json!({"paths": [dir.join("orig").to_string_lossy()]})).unwrap();
+        std::fs::rename(dir.join("orig/pic.png"), dir.join("found/pic.png")).unwrap();
+
+        // Background mode (wait omitted): returns {"background": true} immediately
+        let bg = run_item(&mut app, "file.findMissing", json!({"folder": dir.join("found").to_string_lossy()})).unwrap();
+        assert_eq!(bg, json!({"background": true}));
+
+        // Wait for background task to complete
+        let ctx = app.tasks.repaint.clone().unwrap_or_default();
+        assert!(crate::tasks::wait(&mut app, &ctx, std::time::Duration::from_secs(5)));
+        let last = app.ui.last_find_missing.as_ref().unwrap();
+        assert_eq!(last["found"].as_array().map(Vec::len), Some(1));
+
+        // Now move again and run with wait: true -> returns structured results directly
+        std::fs::create_dir_all(dir.join("found2")).unwrap();
+        std::fs::rename(dir.join("found/pic.png"), dir.join("found2/pic.png")).unwrap();
+        let r = run_item(&mut app, "file.findMissing", json!({"folder": dir.join("found2").to_string_lossy(), "wait": true})).unwrap();
+        assert!(r.get("found").is_some(), "must have 'found' array: {r}");
+        assert!(r.get("missing").is_some(), "must have 'missing' count: {r}");
+        assert!(r.get("ambiguous").is_some(), "must have 'ambiguous' array: {r}");
+        assert_eq!(r["found"].as_array().map(Vec::len), Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1528: `file.findMissing` with `wait: true` when timed out returns an actionable error
+    /// indicating timeout and that the search continues in the background, rather than returning `Ok(null)`.
+    #[test]
+    fn find_missing_waited_timeout_behavior() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-missing-to-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), Default::default());
+        // Injected test-only worker delay so wait times out deterministically
+        app.ui.find_missing_test_delay = Some(std::time::Duration::from_millis(100));
+        let err = run_item(&mut app, "file.findMissing", json!({"folder": dir.to_string_lossy(), "wait": true, "timeout": 0.005})).unwrap_err();
+
+        assert!(err.contains("search timed out"), "error should mention timeout: {err}");
+        assert!(err.contains("search continues in the background"), "error should document continuation: {err}");
+
+        // The background task continues running in app.tasks
+        assert!(app.tasks.is_running("Find Missing Photos"), "task should continue running in background");
+
+        // Clean up the running task so no worker hangs
+        let ctx = app.tasks.repaint.clone().unwrap_or_default();
+        assert!(crate::tasks::wait_for(&mut app, &ctx, "Find Missing Photos", std::time::Duration::from_secs(5)));
+        assert!(!app.tasks.is_running("Find Missing Photos"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1528: `file.findMissing` with `wait: true` must return when its own search finishes,
+    /// even if unrelated background tasks remain active in `app.tasks`.
+    #[test]
+    fn find_missing_waited_completes_while_unrelated_task_remains_active() {
+        let dir = std::env::temp_dir().join(format!("lc-ui-missing-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("orig")).unwrap();
+        std::fs::create_dir_all(dir.join("found")).unwrap();
+        let img = lightcraft_raster::Rgba8::from_fn(8, 8, |_, _| [10, 20, 30, 255]);
+        let o = lightcraft_engine::export::ExportOptions { format: lightcraft_engine::export::ExportFormat::Png, ..Default::default() };
+        std::fs::write(dir.join("orig/pic.png"), lightcraft_engine::export::encode_image(&img, &o).unwrap()).unwrap();
+
+        let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), Default::default());
+        app.session.execute("library.import", &json!({"paths": [dir.join("orig").to_string_lossy()]})).unwrap();
+        std::fs::rename(dir.join("orig/pic.png"), dir.join("found/pic.png")).unwrap();
+
+        // Spawn an unrelated background task that blocks on a channel until released
+        let (tx_unblock, rx_unblock) = std::sync::mpsc::channel::<()>();
+        crate::tasks::spawn(
+            &mut app,
+            "Unrelated Long Background Task",
+            None,
+            move || {
+                let _ = rx_unblock.recv();
+            },
+            |_app, _ctx, _| {},
+        )
+        .unwrap();
+        assert!(app.tasks.is_running("Unrelated Long Background Task"));
+
+        // Run file.findMissing with wait: true: must complete without waiting for the unrelated task
+        let r = run_item(&mut app, "file.findMissing", json!({"folder": dir.join("found").to_string_lossy(), "wait": true, "timeout": 5.0})).unwrap();
+        assert_eq!(r["found"].as_array().map(Vec::len), Some(1), "Find Missing must complete successfully: {r}");
+
+        // The unrelated task must STILL be active
+        assert!(app.tasks.is_running("Unrelated Long Background Task"), "unrelated task must still be running");
+
+        // Clean up the blocked background task
+        let _ = tx_unblock.send(());
+        let ctx = app.tasks.repaint.clone().unwrap_or_default();
+        assert!(crate::tasks::wait(&mut app, &ctx, std::time::Duration::from_secs(5)));
+        assert!(app.tasks.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+
     fn auto_tag_from_tracklog() {
         let dir = std::env::temp_dir().join(format!("lc-ui-tracklog-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

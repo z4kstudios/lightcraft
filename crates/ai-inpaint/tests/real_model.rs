@@ -26,7 +26,7 @@ fn check(device: &candle_core::Device) {
         }
     }
     let t = std::time::Instant::now();
-    let lama = lightcraft_inpaint::Inpainter::load_on(&model, device).unwrap();
+    let lama = lightcraft_ai_inpaint::Inpainter::load_on(&model, device).unwrap();
     eprintln!("{device:?}: load {:?}", t.elapsed());
     for _ in 0..2 {
         let t = std::time::Instant::now();
@@ -52,5 +52,5 @@ fn matches_pytorch_reference() {
 #[test]
 #[ignore]
 fn matches_pytorch_reference_on_the_default_device() {
-    check(&lightcraft_inpaint::default_device());
+    check(&lightcraft_ai_inpaint::default_device());
 }

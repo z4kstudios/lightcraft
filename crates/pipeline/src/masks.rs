@@ -398,7 +398,9 @@ fn box_down(m: &Image<u8>, f: usize) -> Plane {
 
 /// Bilinear sample at continuous pixel coordinates (pixel centres at +0.5), edges extended.
 fn bilinear(p: &Plane, x: f32, y: f32) -> f32 {
-    let (fx, fy) = (x - 0.5, y - 0.5);
+    // (held a pixel outside, which reads the same edge: an infinite coordinate reads the edge
+    // instead of a NaN weight and a neighbour index past isize::MAX)
+    let (fx, fy) = (x.clamp(-1.0, p.width as f32 + 1.0) - 0.5, y.clamp(-1.0, p.height as f32 + 1.0) - 0.5);
     let (x0, y0) = (fx.floor(), fy.floor());
     let (tx, ty) = (fx - x0, fy - y0);
     let (x0, y0) = (x0 as isize, y0 as isize);
@@ -454,21 +456,12 @@ pub fn brush_dabs(s: &BrushStroke, frame: &Frame, w: usize, h: usize) -> BrushDa
     // long the button is held: a sample where the pointer hasn't moved (a stationary hold records
     // one per frame) lays no dab, so waiting in place adds nothing (#518).
     let mut dabs: Vec<Point> = Vec::new();
-    let mut prev: Option<Point> = None;
+    let mut prev = None;
     for p in &s.points {
         let q = to_out.apply(*p);
-        if let Some(prev) = prev {
-            let dist = prev.dist(q);
-            if dist.is_nan() || dist <= STATIONARY_PX {
-                continue;
-            }
-            let n = (dist / (r / 4.0).max(0.5)).ceil() as usize;
-            for k in 1..n {
-                dabs.push(prev.lerp(q, k as f64 / n as f64));
-            }
+        if push_dabs(&mut dabs, prev, q, r) {
+            prev = Some(q);
         }
-        dabs.push(q);
-        prev = Some(q);
     }
     BrushDabs {
         dabs,
@@ -479,6 +472,60 @@ pub fn brush_dabs(s: &BrushStroke, frame: &Frame, w: usize, h: usize) -> BrushDa
         erase: s.erase,
         auto: s.auto_mask,
     }
+}
+
+/// Distance between consecutive dabs of a brush of radius `r` (pixels): a quarter of the radius,
+/// so neighbouring dabs overlap and a stroke reads as continuous however fast it was painted.
+#[inline]
+pub fn dab_spacing(r: f64) -> f64 {
+    (r / 4.0).max(0.5)
+}
+
+/// Append the dabs of one path segment, from the previous sample `prev` (already stamped) to `q`,
+/// for a brush of radius `r`: evenly spaced at most [`dab_spacing`] apart, ending on `q`. The
+/// committed stroke ([`brush_dabs`]) and the live one the UI draws while the button is held place
+/// their dabs with this, so they cover the same pixels (issue #517). A sample where the pointer
+/// hasn't moved (a stationary hold records one per frame) or that is not a finite point lays
+/// nothing, so holding the brush still adds no coverage (#518). Returns whether `q` was stamped;
+/// callers move `prev` on only then.
+pub fn push_dabs(dabs: &mut Vec<Point>, prev: Option<Point>, q: Point, r: f64) -> bool {
+    if !(q.x.is_finite() && q.y.is_finite()) {
+        return false;
+    }
+    if let Some(prev) = prev {
+        let dist = prev.dist(q);
+        if dist.is_nan() || dist <= STATIONARY_PX {
+            return false;
+        }
+        let n = (dist / dab_spacing(r)).ceil();
+        // a hostile or degenerate segment (huge) gets no in-between dabs rather than a huge
+        // allocation: 1 M dabs is far more than any on-screen stroke needs
+        let n = if n.is_finite() { n.clamp(0.0, 1_000_000.0) as usize } else { 0 };
+        for k in 1..n {
+            dabs.push(prev.lerp(q, k as f64 / n as f64));
+        }
+    }
+    dabs.push(q);
+    true
+}
+
+/// How much one dab paints at distance `dd` from its centre: 1 inside the hard core `hard`,
+/// smoothly falling to 0 at the radius `r`.
+#[inline]
+pub fn dab_alpha(dd: f64, r: f64, hard: f64) -> f32 {
+    if dd > r {
+        0.0
+    } else if dd <= hard {
+        1.0
+    } else {
+        1.0 - smooth(hard as f32, r as f32, dd as f32)
+    }
+}
+
+/// A stroke's coverage `v` after another dab paints `a` there: flow accumulates up to density.
+#[inline]
+pub fn accumulate(v: f32, a: f32, flow: f32, density: f32) -> f32 {
+    (v + a * flow * (1.0 - v)).min(density)
 }
 
 /// Auto Mask tolerances: a pixel takes a dab's paint fully up to half of these from the colour
@@ -564,14 +611,14 @@ fn rasterize_brush(strokes: &[BrushStroke], frame: &Frame, w: usize, h: usize, i
                     if dd > r {
                         continue;
                     }
-                    let mut a = if dd <= hard { 1.0 } else { 1.0 - smooth(hard as f32, r as f32, dd as f32) };
+                    let mut a = dab_alpha(dd, r, hard);
                     let i = y * w + x;
                     if let Some((rl, rch)) = refc {
                         a *= auto_similarity(log_l.data[i], chromaticity(img.data[i]), rl, rch);
                     }
                     let v = &mut stroke_alpha.data[i];
                     // flow accumulates within a stroke up to density
-                    *v = (*v + a * flow * (1.0 - *v)).min(dens);
+                    *v = accumulate(*v, a, flow, dens);
                 }
             }
         }
@@ -704,6 +751,47 @@ mod tests {
         let m = Mask { components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: true, shape }], ..Default::default() };
         let e = evaluate(&[m], &f, 100, 100, &img, &l, 0.0, None);
         assert!(e[0].alpha.get(50, 50) < 0.01);
+    }
+
+    /// Issue #517: dabs along a long segment (a fast stroke: two pointer samples far apart) are at
+    /// most [`dab_spacing`] apart, painting dab by dab (the live stroke) or the whole path at once
+    /// (the committed one).
+    #[test]
+    fn a_long_segment_gets_dabs_at_most_the_spacing_apart() {
+        let r = 12.0;
+        let pts = [Point::new(10.0, 20.0), Point::new(610.0, 260.0), Point::new(611.0, 260.0), Point::new(40.0, 400.0)];
+        let mut live = Vec::new();
+        let mut prev = None;
+        for q in pts {
+            if push_dabs(&mut live, prev, q, r) {
+                prev = Some(q);
+            }
+        }
+        assert!(live.len() > 3 * 600 / 12, "{} dabs", live.len());
+        assert!(live.windows(2).all(|w| w[0].dist(w[1]) <= dab_spacing(r) + 1e-9));
+        assert_eq!(live.first(), pts.first());
+        assert_eq!(live.last(), pts.last());
+        // the committed stroke places the same dabs (in output pixels; this frame maps 1:1 scaled)
+        let (w, h) = (1000, 500);
+        let f = frame(w, h);
+        let stroke = BrushStroke { points: pts.map(|p| Point::new(p.x / w as f64, p.y / h as f64)).to_vec(), ..Default::default() };
+        let committed = brush_dabs(&stroke, &f, w, h);
+        let mut again = Vec::new();
+        let mut prev = None;
+        for p in &stroke.points {
+            let q = f.norm_to_out(w, h).apply(*p);
+            if push_dabs(&mut again, prev, q, committed.r) {
+                prev = Some(q);
+            }
+        }
+        assert_eq!(committed.dabs, again);
+        assert!(committed.dabs.windows(2).all(|w| w[0].dist(w[1]) <= dab_spacing(committed.r) + 1e-9));
+        // a hostile segment places no in-between dabs
+        let mut v = Vec::new();
+        assert!(!push_dabs(&mut v, Some(Point::new(f64::NAN, 0.0)), Point::new(1.0, 1.0), r));
+        assert!(!push_dabs(&mut v, None, Point::new(f64::INFINITY, 1.0), r));
+        push_dabs(&mut v, Some(Point::new(0.0, 0.0)), Point::new(1e300, 1.0), 0.0);
+        assert!(v.len() <= 1_000_002, "{}", v.len());
     }
 
     #[test]

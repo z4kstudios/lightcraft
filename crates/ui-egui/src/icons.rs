@@ -83,6 +83,20 @@ pub enum Icon {
     Chat,
     /// Face boxes on/off: four corner brackets round a small face.
     FaceBox,
+    /// Colour grading, all three wheels: three small circles.
+    GradeAll,
+    /// Colour grading, shadows wheel: a filled circle.
+    GradeShadows,
+    /// Colour grading, midtones wheel: a half-filled circle.
+    GradeMidtones,
+    /// Colour grading, highlights wheel: an open circle with rays.
+    GradeHighlights,
+    /// Appearance Mode ▸ Auto (follow the system): a monitor on its stand.
+    Monitor,
+    /// Appearance Mode ▸ Light: a sun (a disc with eight rays).
+    Sun,
+    /// Appearance Mode ▸ Dark: a crescent moon.
+    Moon,
 }
 
 struct Pen<'a> {
@@ -178,6 +192,24 @@ fn paint_with(p: &Painter, rect: Rect, icon: Icon, color: Color32, turn: Option<
             pen.line(&[(4.0, 10.0), (16.0, 10.0)]);
             pen.line(&[(11.0, 5.0), (16.0, 10.0), (11.0, 15.0)]);
         }
+        Monitor => {
+            pen.rect(2.5, 3.5, 17.5, 13.5, 1.5);
+            pen.line(&[(10.0, 13.5), (10.0, 16.5)]);
+            pen.line(&[(6.5, 16.5), (13.5, 16.5)]);
+        }
+        Sun => {
+            pen.circle(10.0, 10.0, 3.2);
+            for i in 0..8 {
+                let a = (i as f32 * 45.0).to_radians();
+                let (c, s) = (a.cos(), a.sin());
+                pen.line(&[(10.0 + 5.4 * c, 10.0 + 5.4 * s), (10.0 + 7.4 * c, 10.0 + 7.4 * s)]);
+            }
+        }
+        Moon => {
+            // outer arc of the disc, then the inner arc of the bite, meeting at the horns
+            pen.arc(10.0, 10.0, 6.5, 2.9, 263.8);
+            pen.arc(13.4, 6.4, 5.0, 214.9, 51.8);
+        }
         Search => {
             pen.circle(8.5, 8.5, 5.0);
             pen.line(&[(12.2, 12.2), (16.5, 16.5)]);
@@ -239,6 +271,32 @@ fn paint_with(p: &Painter, rect: Rect, icon: Icon, color: Color32, turn: Option<
             pen.arc(10.0, 16.0, 9.0, 212.0, 328.0);
             pen.arc(10.0, 4.0, 9.0, 32.0, 148.0);
             pen.circle(10.0, 10.0, 2.5);
+        }
+        GradeAll => {
+            pen.circle(10.0, 6.0, 3.2);
+            pen.circle(5.5, 13.5, 3.2);
+            pen.circle(14.5, 13.5, 3.2);
+        }
+        GradeShadows => {
+            pen.circle(10.0, 10.0, 6.0);
+            pen.dot(10.0, 10.0, 6.0);
+        }
+        GradeMidtones => {
+            pen.circle(10.0, 10.0, 6.0);
+            let half: Vec<(f32, f32)> = (0..=12)
+                .map(|i| {
+                    let a = (90.0 + 180.0 * i as f32 / 12.0).to_radians();
+                    (10.0 + 6.0 * a.cos(), 10.0 + 6.0 * a.sin())
+                })
+                .collect();
+            pen.fill(&half, pen.s.color);
+        }
+        GradeHighlights => {
+            pen.circle(10.0, 10.0, 4.0);
+            for i in 0..8 {
+                let a = (i as f32 * 45.0).to_radians();
+                pen.line(&[(10.0 + 6.0 * a.cos(), 10.0 + 6.0 * a.sin()), (10.0 + 8.0 * a.cos(), 10.0 + 8.0 * a.sin())]);
+            }
         }
         EyeOff => {
             pen.arc(10.0, 16.0, 9.0, 212.0, 328.0);

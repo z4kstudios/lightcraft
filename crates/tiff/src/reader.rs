@@ -140,9 +140,10 @@ impl<'a> Ctx<'a> {
         }
         entries.sort_by_key(|e| e.tag);
         entries.dedup_by_key(|e| e.tag);
-        let next_pos = table + (n as usize).saturating_mul(entry_size);
-        let next = if n as usize == n_read {
-            match self.read_off(next_pos) {
+        // the next-IFD offset follows the whole table, so only a table read in full has one: a count far past the
+        // file (a BigTIFF's is 64-bit) must not reach the arithmetic (issue #1516)
+        let next = if n == n_read as u64 {
+            match n_read.checked_mul(entry_size).and_then(|len| table.checked_add(len)).and_then(|p| self.read_off(p)) {
                 Some(0) | None => 0,
                 Some(v) => base.checked_add(v).unwrap_or(0),
             }

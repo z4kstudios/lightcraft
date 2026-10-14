@@ -53,7 +53,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             if app.integrated_titlebar {
                 window_handle(app, ui, full, left as f32, 12.0);
             }
-            let mut sw = 640.0f32.min(full.width() - 460.0).max(200.0);
+            // room for the filter icon and the six icons on the right
+            let mut sw = 640.0f32.min(full.width() - 540.0).max(200.0);
             if !app.native_menu {
                 // leave room for the in-window menus left of the (centred) search field
                 let menus_right = full.left() + 140.0 + crate::menubar::bar_width(ui) + 24.0;
@@ -62,14 +63,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             let search_left = full.center().x - sw / 2.0;
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if icon_button(ui, "sidebar", Icon::Sidebar, vec2(30.0, 30.0), app.ui.left_panel, true, "Show/hide My Photos panel").clicked() {
+                if icon_button(ui, "sidebar", Icon::Sidebar, vec2(30.0, 30.0), app.ui.left_panel, true, crate::i18n::tr("Show/hide My Photos panel"))
+                    .clicked()
+                {
                     let _ = app.run("view.leftPanel", json!({}));
                 }
                 ui.add_space(8.0);
-                if icon_button(ui, "back", Icon::Back, vec2(30.0, 30.0), false, true, "Back").clicked() {
+                if icon_button(ui, "back", Icon::Back, vec2(30.0, 30.0), false, true, crate::i18n::tr("Back")).clicked() {
                     let _ = app.run("view.back", json!({}));
                 }
-                icon_button(ui, "forward", Icon::Forward, vec2(30.0, 30.0), false, false, "Forward");
+                icon_button(ui, "forward", Icon::Forward, vec2(30.0, 30.0), false, false, crate::i18n::tr("Forward"));
                 if !app.native_menu {
                     // no native menu bar (web, Windows, Linux): menus in the top bar
                     ui.add_space(10.0);
@@ -102,6 +105,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 child.painter().galley(pos2(x0 + 24.0, sr.center().y - g.size().y / 2.0), g, t.text_dim);
             }
             let resp = crate::text_field::TextField::singleline("field:search", &mut app.ui.search)
+                .label(crate::i18n::tr("Search Photos"))
                 .frame(false)
                 .width(sr.width() - 20.0)
                 .font(t.font(13.5))
@@ -139,7 +143,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             let fresp = fresp.on_hover_text(if active > 0 {
                 crate::i18n::tr_format!("Filter bar — {active} active filter{}", if active == 1 { "" } else { "s" }, active = active)
             } else {
-                "Filter bar".into()
+                crate::i18n::tr("Filter bar").into()
             });
             if fresp.clicked() {
                 let _ = app.run("view.filterBar", json!({}));
@@ -165,7 +169,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 ("bell", Icon::Bell, "Activity", "panel.activity"),
             ] {
                 let r = Rect::from_center_size(pos2(x, full.center().y), vec2(28.0, 28.0));
-                let resp = ui.interact(r, egui::Id::new(("top", id)), Sense::click()).on_hover_text(tip);
+                let resp = ui.interact(r, egui::Id::new(("top", id)), Sense::click()).on_hover_text(crate::i18n::tr(tip));
                 register(ui.ctx(), format!("icon:{id}"), r);
                 let warn = id == "cloud" && unsaved.is_some();
                 let colour = if warn {
@@ -187,6 +191,50 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 }
                 x -= 40.0;
             }
+            // Appearance Mode: a click steps Auto → Light → Dark → Auto; the icon shows the mode
+            let (icon, mode) = appearance_icon(app.ui.settings.appearance_mode);
+            let r = Rect::from_center_size(pos2(x, full.center().y), vec2(28.0, 28.0));
+            let tip = format!("{}: {}", crate::i18n::tr("Appearance Mode"), crate::i18n::tr(mode));
+            let resp = ui.interact(r, egui::Id::new(("top", "appearance")), Sense::click()).on_hover_text(tip);
+            register(ui.ctx(), "icon:appearance", r);
+            paint(ui.painter(), r.shrink(5.0), icon, if resp.hovered() { t.text } else { t.icon });
+            if resp.clicked() {
+                let _ = app.run("view.appearance", json!({}));
+            }
+            resp.context_menu(|ui| {
+                let settings = ui.button(crate::i18n::tr("Appearance Settings…"));
+                register(ui.ctx(), "menu:appearanceSettings", settings.rect);
+                if settings.clicked() {
+                    let _ = app.run("app.settings", json!({"tab": "interface"}));
+                    ui.close();
+                }
+                let favorites = app.ui.settings.favorite_themes.clone();
+                for dark in [false, true] {
+                    let group: Vec<_> =
+                        crate::theme::ThemeKind::ALL.iter().filter(|k| k.is_dark() == dark && favorites.iter().any(|id| id == k.id())).collect();
+                    if !group.is_empty() {
+                        ui.separator();
+                    }
+                    for kind in group {
+                        let r = ui.selectable_label(app.ui.settings.theme(app.system_theme(ui.ctx())) == *kind, crate::i18n::tr(kind.label()));
+                        register(ui.ctx(), format!("menu:themeFavorite-{}", kind.id()), r.rect);
+                        if r.clicked() {
+                            let _ = app.run("view.theme", json!({"theme": kind.id()}));
+                            ui.close();
+                        }
+                    }
+                }
+            });
             let _ = Align2::CENTER_CENTER;
         });
+}
+
+/// The appearance button's icon and the mode's name for its tooltip.
+pub fn appearance_icon(mode: crate::state::AppearanceMode) -> (Icon, &'static str) {
+    use crate::state::AppearanceMode;
+    match mode {
+        AppearanceMode::Auto => (Icon::Monitor, "Sync with System"),
+        AppearanceMode::Light => (Icon::Sun, "Light Mode"),
+        AppearanceMode::Dark => (Icon::Moon, "Dark Mode"),
+    }
 }

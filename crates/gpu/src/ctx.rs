@@ -29,7 +29,11 @@ const MODULES: &[Module] = &[
         ],
         entries: &["main"],
     },
-    Module { src: include_str!("wgsl/blur.wgsl"), bindings: &[("src", false, "f32"), ("dst", true, "f32")], entries: &["box_h", "box_v"] },
+    Module {
+        src: include_str!("wgsl/blur.wgsl"),
+        bindings: &[("src", false, "f32"), ("dst", true, "f32")],
+        entries: &["box_h", "box_v", "median_h", "median_v"],
+    },
     Module {
         src: include_str!("wgsl/resize.wgsl"),
         bindings: &[("src", false, "f32"), ("table", false, "u32"), ("dst", true, "f32")],
@@ -323,7 +327,8 @@ impl Gpu {
             log::error!("gpu: device lost ({reason:?}): {msg}");
             crate::mark_broken(&format!("device lost ({reason:?}): {msg}"));
         });
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // a kernel the driver's compiler refuses is a validation or an internal error: no GPU, not a half-built one
+        let scopes = [device.push_error_scope(wgpu::ErrorFilter::Validation), device.push_error_scope(wgpu::ErrorFilter::Internal)];
         let consts = constants();
         let mut kernels = HashMap::new();
         for m in MODULES {
@@ -349,7 +354,9 @@ impl Gpu {
                 kernels.insert(*e, Kernel { pipeline, layout: layout.clone(), nbuf: m.bindings.len() });
             }
         }
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        let [validation, internal] = scopes;
+        let (internal, validation) = (pollster::block_on(internal.pop()), pollster::block_on(validation.pop()));
+        if let Some(e) = internal.or(validation) {
             log::error!("gpu: kernels failed to build on {}: {e}", info.name);
             return Err(format!("{}: kernels failed to build ({e})", info.name));
         }

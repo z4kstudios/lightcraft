@@ -18,7 +18,7 @@ use lightcraft_meta::{Region, RegionKind};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, bad, cmd, has_selection};
-use crate::{Result, Session};
+use crate::{AiModel, EngineError, Result, Session};
 
 const C: &str = "faces.detect";
 /// Regions made by this command say so in their description; only those are replaced on a new run.
@@ -34,15 +34,39 @@ const EXISTING_IOU: f64 = 0.3;
 /// What to tell someone who has not downloaded the detector yet.
 const NOT_INSTALLED: &str = "finding faces needs the YuNet face detector (232 KB, MIT): download it in Settings > Faces";
 
+/// Why [`detector`] has no detector to give.
+#[derive(Debug)]
+pub(crate) enum NoDetector {
+    /// Not downloaded yet: a frontend offers the download ([`crate::ErrorKind::ModelMissing`]).
+    NotInstalled,
+    /// Nowhere to keep it, or there but unusable: says what to do.
+    Unusable(String),
+}
+
+impl NoDetector {
+    /// Command `cmd`'s error for it. The message reads as before kinds existed (an invalid-parameters
+    /// error), so control-channel and MCP clients see the same `error` text.
+    pub(crate) fn into_error(self, cmd: &str) -> EngineError {
+        match self {
+            Self::NotInstalled => EngineError::ModelMissing { model: AiModel::FaceDetector, msg: bad(cmd, NOT_INSTALLED).to_string() },
+            Self::Unusable(why) => bad(cmd, why),
+        }
+    }
+}
+
 /// The installed YuNet, loaded once and kept (a new one is loaded when the model folder changes).
 /// (also used by the background scan, which aligns faces by the detector's landmarks and finds faces in photos that have none)
-pub(crate) fn detector(s: &Session) -> std::result::Result<Arc<Detector>, String> {
+pub(crate) fn detector(s: &Session) -> std::result::Result<Arc<Detector>, NoDetector> {
     static LOADED: Mutex<Option<(PathBuf, Arc<Detector>)>> = Mutex::new(None);
-    let home = s.face_models_dir.as_deref().ok_or("this build has nowhere to keep face models (the desktop app does)")?.join(YUNET_ID);
+    let home = s
+        .face_models_dir
+        .as_deref()
+        .ok_or_else(|| NoDetector::Unusable("this build has nowhere to keep face models (the desktop app does)".into()))?
+        .join(YUNET_ID);
     let path = home.join("model.onnx");
     // installing writes the manifest last, so a folder without one is not (yet) a model
     if !path.is_file() || !home.join("face-model.json").is_file() {
-        return Err(NOT_INSTALLED.into());
+        return Err(NoDetector::NotInstalled);
     }
     let mut loaded = LOADED.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((p, d)) = loaded.as_ref()
@@ -50,12 +74,14 @@ pub(crate) fn detector(s: &Session) -> std::result::Result<Arc<Detector>, String
     {
         return Ok(d.clone());
     }
-    let len = std::fs::metadata(&path).map_err(|e| format!("could not read the detector: {e}"))?.len();
+    let len = std::fs::metadata(&path).map_err(|e| NoDetector::Unusable(format!("could not read the detector: {e}")))?.len();
     if len > MAX_MODEL_BYTES {
-        return Err("the detector's file is far bigger than YuNet: remove it in Settings > Faces and download it again".into());
+        return Err(NoDetector::Unusable("the detector's file is far bigger than YuNet: remove it in Settings > Faces and download it again".into()));
     }
-    let bytes = std::fs::read(&path).map_err(|e| format!("could not read the detector: {e}"))?;
-    let d = Arc::new(Detector::new(&bytes).map_err(|e| format!("{e}: remove the detector in Settings > Faces and download it again"))?);
+    let bytes = std::fs::read(&path).map_err(|e| NoDetector::Unusable(format!("could not read the detector: {e}")))?;
+    let d = Arc::new(
+        Detector::new(&bytes).map_err(|e| NoDetector::Unusable(format!("{e}: remove the detector in Settings > Faces and download it again")))?,
+    );
     *loaded = Some((path, d.clone()));
     Ok(d)
 }
@@ -103,7 +129,7 @@ fn detect(s: &mut Session, p: &Value) -> Result<Value> {
         nms_iou: p.get("nmsIou").and_then(Value::as_f64).map_or(defaults.nms_iou, |v| v as f32),
         max_faces: p.get("maxFaces").and_then(Value::as_u64).map_or(defaults.max_faces, |v| usize::try_from(v).unwrap_or(defaults.max_faces)),
     };
-    let detector = detector(s).map_err(|e| bad(C, e))?;
+    let detector = detector(s).map_err(|e| e.into_error(C))?;
     let started = Instant::now();
     let (mut results, mut ops) = (Vec::new(), Vec::new());
     for id in s.targets(p) {

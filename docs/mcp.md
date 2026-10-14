@@ -22,6 +22,9 @@ it open, `--library` on the same folder fails with "This library is already open
 `--demo` starts the headless session with the procedurally generated demo library;
 `--compact` lists only the helper tools (see below). In connect mode the server starts even when
 the app is not running yet and connects on the first call (and reconnects if the app restarts).
+A request is sent again only when it never reached the app. If the connection drops after a request
+was sent but before its reply, the tool fails with "the outcome is unknown" and nothing is resent, so a
+command such as undo can't run twice: check the app's state before retrying.
 
 Logs go to stderr; stdout carries only protocol messages.
 
@@ -164,13 +167,17 @@ per-request `_meta` receive `resultType: complete` and list/read cache hints; re
 | `select_photos {ids, active?, mode?}` | Set the selection / active photo. Every id (and `active`) must be in the library: an unknown id is a tool error (`no such photo 9999`) and the selection and active photo are left as they were |
 | `list_controls {section?}` | Every develop slider: id (`light.exposure`…), range, default, current value |
 | `get_develop {id?}` | Full develop-settings JSON, with `process`: the rendering process the photo is on ([process-versions.md](process-versions.md)) |
-| `set_develop {id?, values?, settings?, label?}` | `values`: `{controlId: number}`; `settings`: partial develop JSON deep-merged. Undoable |
+| `set_develop {id?, values?, settings?, label?}` | `values`: `{controlId: number}`; `settings`: partial develop JSON deep-merged. Undoable. A `crop.angle` value turns the crop as `crop.straighten` does: kept if it still fits, else shrunk to the largest crop of its aspect inside the photo (`settings` is merged as given, unfitted). White balance: `values` with `wb.temp` / `wb.tint` is Kelvin on raws with colour matrices (DNG, and cameras LightCraft has matrices for) and relative (6500 = as shot) elsewhere; a `settings.wb` with `temp` / `tint` and no `"scale": "kelvin"` is read on the relative scale on every raw (see [control-protocol.md](control-protocol.md)) |
 | `apply_preset {preset, amount?, ids?}` | Apply a preset (ids from `cmd_presets_list`) |
-| `crop {id?, rect?, angle?, reset?}` | Normalized crop rect `[x0,y0,x1,y1]` and straighten angle; at least one of `rect`, `angle`, `reset: true` |
+| `crop {id?, rect?, angle?, reset?}` | Normalized crop rect `[x0,y0,x1,y1]` and straighten angle; at least one of `rect`, `angle`, `reset: true`. The crop always ends inside the photo: an `angle` alone keeps the crop if it still fits, else shrinks it to the largest of its aspect that does |
 | `render_photo {id?, size?, format?, path?}` | Render with current settings → **image content** (PNG, or JPEG with `format: "jpeg"`), long edge `size` (default 1024) |
-| `export {path \| dir, id? \| ids?, format?, longEdge? \| shortEdge? \| width?/height? \| megapixels? \| percent?, dontEnlarge?, ppi?, quality?, colorSpace?, bitDepth?, …}` | Full-quality render to `.png` / `.jpg` / `.tif` / `.webp` / `.avif`; `format: "original"` copies the file + an XMP sidecar with the edits, `format: "dng"` writes raw photos as DNG with the edits embedded. No size param = 3000 px long edge; `longEdge: 0` = full size (cropped, native resolution); `width` + `height` fit either orientation; `dontEnlarge` defaults to true |
+| `export {path \| dir, id? \| ids?, format?, longEdge? \| shortEdge? \| width?/height? \| megapixels? \| percent?, dontEnlarge?, ppi?, quality?, colorSpace?, bitDepth?, …}` | Full-quality render to `.png` / `.jpg` / `.tif` / `.webp` / `.avif` / `.jxl` (`jxlLossless`, `jxlEffort`, `jxlProgressive`); `format: "original"` copies the file + an XMP sidecar with the edits, `format: "dng"` writes raw photos as DNG with the edits embedded. No size param = 3000 px long edge; `longEdge: 0` = full size (cropped, native resolution); `width` + `height` fit either orientation; `dontEnlarge` defaults to true |
 
-Tools taking `id` make that photo active first; without it they act on the active photo.
+`get_develop {id}` and `render_photo {id}` use that photo without changing the selection.
+`set_develop`, `crop` and `export` with a supplied photo `id` end the current edit interaction,
+replace the selection with that one photo and make it active. Without `id`,
+`get_develop`, `set_develop` and `crop` use the active photo; `render_photo` also falls back to the first
+selected photo, and `export` uses the selection for batch export, as above.
 
 ### Connect mode only
 
@@ -207,6 +214,13 @@ still reaches every command.
 | `lightcraft://photo/active` | Everything about the active photo (`photo.inspect`) |
 | `lightcraft://develop/active` | The active photo's develop settings (`develop.get`) |
 | `lightcraft://controls` | Every develop control with its current value (`develop.controls`) |
+
+Read these resources again to poll current state; they are snapshots, and `initialize` advertises
+`resources.subscribe: false`. `lightcraft://photo/active` includes the photo's `id` and `develop`
+settings together; `lightcraft://controls` contains slider values for the active photo at that read.
+Separate reads can observe different active photos. For controller feedback from GUI edits, use
+connect mode; headless mode owns a separate session. See [External controllers](control-protocol.md#external-controllers)
+for command mapping, live slider values and polling semantics.
 
 ## Example session
 
@@ -255,6 +269,7 @@ lightcraft-cli run --demo --script steps.jsonl --keep-going
 lightcraft-cli render in.dng -o out.tif --opt colorSpace=displayP3 --opt bitDepth=16 --opt percent=50
 lightcraft-cli render in.dng -o out.jpg --set light.exposure=0.5 --set light.contrast=20 --size 2048
 lightcraft-cli render in.jpg -o out.png --settings look.json --preset <presetId>
+lightcraft-cli render in.dng -o out.jpg --opt addToPhotos=true --opt photosAlbum=Trip   # macOS: then into Apple Photos
 lightcraft-cli commands [--json]   # the command registry
 lightcraft-cli controls [--json]   # develop control ids and ranges
 lightcraft-cli calibrate --max 300 ~/Pictures/2026   # camera colour profiles (docs/camera-preview-colour.md)
@@ -267,6 +282,23 @@ lightcraft-cli calibrate --max 300 ~/Pictures/2026   # camera colour profiles (d
   (`Remote`) against a stand-in control server; also import → render → JPEG export of a real file.
 - `apps/lightcraft-cli/tests/cli.rs` — spawns `lightcraft-cli mcp` with real pipes; `render`;
   `commands`.
+
+## Add to Apple Photos (macOS)
+
+`app.export` (MCP `export` tool, `lightcraft-cli run`, the desktop app) takes `addToPhotos: true` and
+`photosAlbum` to hand the files it wrote to Apple Photos, into that album (a top-level album of exactly that
+name, made when missing). The result's `applePhotos` is the import job: `{job, running, requested, album}`
+plus `{imported, ids, warning?}`, `{error}` or `{skipped}` (with `cancelled: true` when the export was cancelled) once Photos is done; the files are written either
+way. Headless (this server, `lightcraft-cli`) waits for Photos by default; the desktop app (connect mode)
+answers with the running job and `export.photosImports {job}` gives the outcome. `export.addToPhotos {paths,
+album?, wait?}` does the same for files already on disk (`wait` defaults to true headless, false in the desktop
+app, which refuses `wait: true`; with `wait: false` headless, the server waits for the import before it exits at end of input). One import
+runs at a time, and an export adding to Photos reserves it before it writes: another is refused, naming the
+job in the way. On other platforms `addToPhotos: true` is refused before anything is written, and
+`export.addToPhotos` is disabled with the reason. The first time, macOS asks the user to allow LightCraft (or
+the terminal running `lightcraft-cli`) to control Photos. After that, any client can add any file LightCraft can
+read to the user's Photos library (and so to iCloud Photos when that is on), not only exported ones: see [Who
+can add what](apple-photos.md#how-it-works).
 
 ## Export progress and cancellation
 

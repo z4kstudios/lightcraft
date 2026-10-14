@@ -1,5 +1,5 @@
 //! AI Remove (Z4K Studios addition, branch `z4k`): Remove spots filled by the LaMa model
-//! (`lightcraft-inpaint`). The model is downloaded once on request (206 MB, Apache-2.0) into
+//! (`lightcraft-ai-inpaint`). The model is downloaded once on request (206 MB, Apache-2.0) into
 //! `<config>/models/lama`; the fill it computes is stored with the spot, so renders, exports and
 //! other machines never need it.
 
@@ -20,7 +20,7 @@ pub fn model_dir() -> Option<PathBuf> {
     std::env::var_os("LIGHTCRAFT_LAMA_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| crate::config::config_dir().map(|d| lightcraft_inpaint::fetch::model_dir(&d.join("models"))))
+        .or_else(|| crate::config::config_dir().map(|d| lightcraft_ai_inpaint::fetch::model_dir(&d.join("models"))))
 }
 
 #[derive(Default)]
@@ -36,13 +36,13 @@ fn download() -> &'static Download {
     D.get_or_init(Download::default)
 }
 
-fn model() -> &'static Mutex<Option<Arc<lightcraft_inpaint::Inpainter>>> {
-    static M: OnceLock<Mutex<Option<Arc<lightcraft_inpaint::Inpainter>>>> = OnceLock::new();
+fn model() -> &'static Mutex<Option<Arc<lightcraft_ai_inpaint::Inpainter>>> {
+    static M: OnceLock<Mutex<Option<Arc<lightcraft_ai_inpaint::Inpainter>>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(None))
 }
 
 fn installed() -> Option<PathBuf> {
-    model_dir().and_then(|d| lightcraft_inpaint::fetch::installed(&d))
+    model_dir().and_then(|d| lightcraft_ai_inpaint::fetch::installed(&d))
 }
 
 fn status() -> Value {
@@ -54,7 +54,7 @@ fn status() -> Value {
         "total": d.total.load(Ordering::SeqCst),
         "error": d.error.lock().unwrap_or_else(PoisonError::into_inner).clone(),
         "modelDir": model_dir().map(|p| p.display().to_string()),
-        "sizeBytes": lightcraft_inpaint::fetch::WEIGHTS_SIZE,
+        "sizeBytes": lightcraft_ai_inpaint::fetch::WEIGHTS_SIZE,
         "licence": "Apache-2.0 (big-lama, Samsung AI Center)",
     })
 }
@@ -68,16 +68,16 @@ fn start_download() -> Result<Value> {
     }
     *d.error.lock().unwrap_or_else(PoisonError::into_inner) = None;
     d.done.store(0, Ordering::SeqCst);
-    d.total.store(lightcraft_inpaint::fetch::WEIGHTS_SIZE, Ordering::SeqCst);
+    d.total.store(lightcraft_ai_inpaint::fetch::WEIGHTS_SIZE, Ordering::SeqCst);
     let spawned = std::thread::Builder::new().name("lama-download".into()).spawn(move || {
         let d = download();
-        let mirrors = lightcraft_inpaint::fetch::mirrors(std::env::var(lightcraft_inpaint::fetch::MIRRORS_ENV).ok().as_deref());
+        let mirrors = lightcraft_ai_inpaint::fetch::mirrors(std::env::var(lightcraft_ai_inpaint::fetch::MIRRORS_ENV).ok().as_deref());
         let cancel = AtomicBool::new(false);
-        let r = lightcraft_inpaint::fetch::download(
-            lightcraft_inpaint::fetch::FILES,
+        let r = lightcraft_ai_inpaint::fetch::download(
+            lightcraft_ai_inpaint::fetch::FILES,
             &mirrors,
             &dir,
-            &lightcraft_inpaint::fetch::Options::default(),
+            &lightcraft_ai_inpaint::fetch::Options::default(),
             &cancel,
             &mut |p| d.done.store(p.done, Ordering::SeqCst),
         );
@@ -93,13 +93,13 @@ fn start_download() -> Result<Value> {
     Ok(status())
 }
 
-fn loaded(c: &str) -> Result<Arc<lightcraft_inpaint::Inpainter>> {
+fn loaded(c: &str) -> Result<Arc<lightcraft_ai_inpaint::Inpainter>> {
     let mut m = model().lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(l) = m.as_ref() {
         return Ok(l.clone());
     }
     let path = installed().ok_or_else(|| bad(c, "the AI Remove model isn't installed yet (run aiRemove.install)"))?;
-    let l = Arc::new(lightcraft_inpaint::Inpainter::load(&path).map_err(|e| bad(c, e.to_string()))?);
+    let l = Arc::new(lightcraft_ai_inpaint::Inpainter::load(&path).map_err(|e| bad(c, e.to_string()))?);
     *m = Some(l.clone());
     Ok(l)
 }
@@ -137,7 +137,7 @@ pub(crate) fn compute(s: &mut Session, dd: &lightcraft_develop::DevelopSettings,
     let t_src = t.elapsed();
     let job = lightcraft_pipeline::spots::fill_job(&src, &info, dd, i).ok_or_else(|| bad(c, "the spot is outside the photo"))?;
     let t_job = t.elapsed();
-    let filled = lama.fill_at(&job.rgb, &job.mask, job.w, job.h, lightcraft_inpaint::WORK_SIDE).map_err(|e| bad(c, e.to_string()))?;
+    let filled = lama.fill_at(&job.rgb, &job.mask, job.w, job.h, lightcraft_ai_inpaint::WORK_SIDE).map_err(|e| bad(c, e.to_string()))?;
     let t_fill = t.elapsed();
     if let Some(dir) = std::env::var_os("LIGHTCRAFT_AI_REMOVE_DUMP") {
         let dir = std::path::PathBuf::from(dir);

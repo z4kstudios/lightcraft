@@ -9,8 +9,8 @@
 //! the JPEG XS markers SOC + CAP (ISO/IEC 21122-1, `FF10 FF50`) and have no `0x0096` table (issue #193).
 
 use super::{nefc, white_from_data};
-use crate::tiffraw::{Packing, read_image};
-use crate::{BlackLevel, Cfa, ColorData, OpcodeLists, RawData, RawError, RawFormat, RawImage, Rect, Result};
+use crate::tiffraw::{Packing, check_image, read_image};
+use crate::{BlackLevel, Cfa, ColorData, Mode, OpcodeLists, RawData, RawError, RawFormat, RawImage, Rect, Result};
 use lightcraft_geom::Orientation;
 use lightcraft_tiff::image::ImageInfo;
 use lightcraft_tiff::tags::{self as t, photometric};
@@ -58,7 +58,8 @@ fn default_crop(mn: Option<&makernote::MakerNote>, w: usize, h: usize) -> Rect {
 }
 
 /// A body that records no CropArea, measured on its own files: the image area inside the sensor data (where the
-/// camera's full-size JPEG sits when the two are aligned) and the level where its channels clip.
+/// camera's full-size JPEG sits when the two are aligned) and, when the data's own top would be wrong, the level
+/// where its channels clip.
 struct MeasuredBody {
     model: &'static str,
     /// Sensor data size and sample depth of the measured files.
@@ -66,7 +67,7 @@ struct MeasuredBody {
     bits: u32,
     /// Image area in sensor pixels: x, y, width, height.
     crop: (usize, usize, usize, usize),
-    white: f32,
+    white: Option<f32>,
 }
 
 /// * **NIKON D4** (148 uncompressed 14-bit NEFs from one body, 2023–2026, ISO 100–10000): the data is 4992 × 3292,
@@ -74,8 +75,24 @@ struct MeasuredBody {
 ///   4928 × 3280 JPEG sits at (8, 6). Without this area the optical black shows as purple stripes on both sides.
 ///   Green saturates at 15546–15672 while red and blue run on to 15687–16383, so the data's own top (~16300) leaves
 ///   clipped highlights magenta; one level of 15520 for every channel turns them white and keeps the white balance.
-const MEASURED_BODIES: &[MeasuredBody] =
-    &[MeasuredBody { model: "NIKON D4", size: (4992, 3292), bits: 14, crop: (8, 6, 4928, 3280), white: 15520.0 }];
+/// * **NIKON D7100** (issue #1248; 14-bit NEFs from the public zjqc/photographing-art repository, with their
+///   Lightroom Classic exports): the data holds picture, not masked lines, beyond the camera's frame. In full frame
+///   it is 6036 × 4020 and the camera's JPEG is 6000 × 4000; in the 1.3x crop mode it is 4812 × 3212 and the JPEG
+///   4800 × 3200. Fitting renders of the full data to Lightroom's exports (feature matches, homography) puts
+///   Lightroom's frame, the camera JPEG's size, at (18, 10) and (6, 6): within 0.5 px mean on DSC_1316, DSC_2763
+///   and DSC_1486. Without it, renders are larger than Lightroom's and its crops land up to 6 px off (18 px in
+///   full frame).
+/// * **NIKON D90** (550 compressed 12-bit NEFs from one body, 10 measured): the data is 4352 × 2868 and its last 42
+///   columns (from 4310) are filler at a flat ~254 whatever the exposure, above the dark image samples (black 0), so
+///   the masked-column test keeps them and they develop as a pink band on the right. The camera's 4288 × 2848 JPEG
+///   sits at (10, 10). Green saturates at 3840–3851 while red and blue run on to 4095; one level of 3830 keeps
+///   clipped highlights white.
+const MEASURED_BODIES: &[MeasuredBody] = &[
+    MeasuredBody { model: "NIKON D4", size: (4992, 3292), bits: 14, crop: (8, 6, 4928, 3280), white: Some(15520.0) },
+    MeasuredBody { model: "NIKON D7100", size: (6036, 4020), bits: 14, crop: (18, 10, 6000, 4000), white: None },
+    MeasuredBody { model: "NIKON D7100", size: (4812, 3212), bits: 14, crop: (6, 6, 4800, 3200), white: None },
+    MeasuredBody { model: "NIKON D90", size: (4352, 2868), bits: 12, crop: (10, 10, 4288, 2848), white: Some(3830.0) },
+];
 
 fn measured_body(model: &str, w: usize, h: usize, bits: u32) -> Option<&'static MeasuredBody> {
     MEASURED_BODIES.iter().find(|b| b.model == model.trim() && b.size == (w, h) && b.bits == bits)
@@ -88,16 +105,27 @@ fn raw_ifd(tiff: &Tiff) -> Option<&Ifd> {
         .max_by_key(|i| i.u64(t::IMAGE_WIDTH).unwrap_or(0).saturating_mul(i.u64(t::IMAGE_LENGTH).unwrap_or(0)))
 }
 
-/// Width without the optically masked columns some bodies append on the right: trailing columns (at most 64)
-/// whose mean is below 1% of the white level while the image interior is brighter. Kept even for CFA phase.
-pub(crate) fn trailing_masked_columns(d: &[u16], w: usize, h: usize, white: f32) -> usize {
-    if w < 128 || h == 0 {
+/// Rows the masked-column test reads, from the top of the frame. The header probe ([`Mode::Header`]) decodes
+/// only these (a compressed strip is one sequential Huffman stream, so it can stop here; an uncompressed one reads
+/// just its first strips), and the full decode judges the active width from the same rows, so
+/// [`crate::probe_info`] equals [`RawImage::info`] of the decoded image (issue #708). On every corpus NEF the
+/// answer is the same for 8 to 512 rows as for the whole frame: the masked columns decode to 0 (compressed) or
+/// ~19 (uncompressed) while live columns sit at the black level (~150 at 12 bit, ~600 at 14 bit) or above.
+pub(crate) const MASK_ROWS: usize = 128;
+
+/// Width without the optically masked columns some bodies append on the right (the D5100 and D7000 write 8, with
+/// no maker-note tag that says so, in compressed and uncompressed files alike): trailing columns (at most 64) whose
+/// mean over the first [`MASK_ROWS`] rows of `d` is below 1% of the nominal white level and a tenth of the image
+/// interior. Kept even for CFA phase.
+pub(crate) fn trailing_masked_columns(d: &[u16], w: usize, bits: u32) -> usize {
+    let rows = d.len().checked_div(w).unwrap_or(0).min(MASK_ROWS);
+    if w < 128 || rows == 0 {
         return w;
     }
-    let step = (h / 256).max(1);
-    let col_mean = |x: usize| (0..h).step_by(step).map(|y| d[y * w + x] as f64).sum::<f64>() / h.div_ceil(step) as f64;
+    let col_mean = |x: usize| (0..rows).map(|y| d.get(y * w + x).copied().unwrap_or(0) as f64).sum::<f64>() / rows as f64;
     let interior = (w / 4..w * 3 / 4).step_by(w / 64).map(col_mean).sum::<f64>() / 32.0;
-    let dark = (white as f64 * 0.01).min(interior * 0.1);
+    let white = ((1u32 << bits.clamp(1, 16)) - 1) as f64;
+    let dark = (white * 0.01).min(interior * 0.1);
     let mut aw = w;
     while aw > w - 64 && col_mean(aw - 1) < dark {
         aw -= 1;
@@ -105,7 +133,7 @@ pub(crate) fn trailing_masked_columns(d: &[u16], w: usize, h: usize, white: f32)
     aw & !1
 }
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<RawImage> {
+pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
     let tiff = Tiff::parse(bytes)?;
     let ifd0 = &tiff.ifds[0];
     let raw = raw_ifd(&tiff).ok_or_else(|| RawError::Unsupported("NEF without a CFA image IFD".into()))?;
@@ -115,10 +143,15 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RawImage> {
     let make = ifd0.string(t::MAKE).unwrap_or_default();
     let mn =
         tiff.exif().and_then(|e| e.get(t::MAKER_NOTE)).and_then(|e| makernote::parse_makernote(bytes, e.offset, e.count() as u64, tiff.order, &make));
+    // the header probe reads only the rows the masked-column test needs
+    let rows = match mode {
+        Mode::Full => h,
+        Mode::Header => h.min(MASK_ROWS),
+    };
     let data = if info.compression == t::compression::NIKON {
-        compressed(bytes, &info, mn.as_ref())?
+        compressed(bytes, &info, mn.as_ref(), rows)?
     } else {
-        uncompressed(bytes, &info, tiff.order, mn.as_ref())?
+        uncompressed(bytes, &info, tiff.order, mn.as_ref(), rows)?
     };
     let RawData::U16(ref samples) = data else { return Err(RawError::Unsupported("float NEF".into())) };
 
@@ -144,9 +177,16 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RawImage> {
         (Some([2, 2]), Some(p)) if p.len() == 4 && p.iter().all(|&c| c <= 2) => Cfa { width: 2, height: 2, pattern: p.to_vec() },
         _ => Cfa::bayer_static("RGGB"),
     };
-    let body = measured_body(&ifd0.string(t::MODEL).unwrap_or_default(), w, h, bits);
-    let white = body.map_or_else(|| white_from_data(samples, bits), |b| b.white);
-    let active_w = trailing_masked_columns(samples, w, h, white);
+    let model = ifd0.string(t::MODEL).unwrap_or_default();
+    let body = measured_body(&model, w, h, bits);
+    let active_w = trailing_masked_columns(samples, w, bits);
+    // the white level is measured from the whole image (or known for a measured body); the probe (no samples in its
+    // result) takes the nominal one
+    let white = match (body.and_then(|b| b.white), mode) {
+        (Some(white), _) => white,
+        (None, Mode::Full) => white_from_data(samples, bits),
+        (None, Mode::Header) => ((1u32 << bits.clamp(1, 16)) - 1) as f32,
+    };
     let crop = match body {
         Some(&MeasuredBody { crop: (x, y, cw, ch), .. }) if x + cw <= active_w && y + ch <= h => Rect::new(x, y, cw, ch),
         _ => default_crop(mn.as_ref(), active_w, h),
@@ -159,7 +199,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RawImage> {
         width: w,
         height: h,
         cpp: 1,
-        data,
+        data: match mode {
+            Mode::Full => data,
+            Mode::Header => RawData::U16(Vec::new()),
+        },
         cfa: Some(cfa),
         bits,
         black,
@@ -170,17 +213,21 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<RawImage> {
         color: ColorData::default(),
         wb_multipliers: wb,
         linearized: false,
-        opcodes: OpcodeLists::default(),
+        // Nikon's in-file distortion correction, about the optical centre (which follows the sensor shift)
+        opcodes: OpcodeLists {
+            list3: super::nef_lens::distortion(&model, raw, Rect::new(0, 0, active_w, h), crop).into_iter().collect(),
+            ..Default::default()
+        },
         metadata,
     };
-    img.validate()?;
+    img.validate_for(mode)?;
     Ok(img)
 }
 
 /// Uncompressed strips: 16-bit words or 12-bit packed, told apart by the strip size. Packed 12-bit data is an MSB-first
 /// byte stream, except in files with an NRW data block (Coolpix), where it is MSB-first inside little-endian 32-bit
-/// words (the rows are whole words).
-fn uncompressed(bytes: &[u8], info: &ImageInfo, order: ByteOrder, mn: Option<&makernote::MakerNote>) -> Result<RawData> {
+/// words (the rows are whole words). Reads the first `rows` rows (the strips that hold them) of the `info.height`.
+fn uncompressed(bytes: &[u8], info: &ImageInfo, order: ByteOrder, mn: Option<&makernote::MakerNote>, rows: usize) -> Result<RawData> {
     let (w, h) = (info.width as usize, info.height as usize);
     let bits = info.bits() as u32;
     let row_samples = w * info.samples_per_pixel as usize;
@@ -196,11 +243,18 @@ fn uncompressed(bytes: &[u8], info: &ImageInfo, order: ByteOrder, mn: Option<&ma
     } else {
         Packing::Msb
     };
-    read_image(bytes, info, order, packing)
+    if rows >= h {
+        return read_image(bytes, info, order, packing);
+    }
+    // the whole image's limits apply either way; then only the strips holding the first `rows` rows are unpacked
+    check_image(bytes, info)?;
+    let top = ImageInfo { height: rows as u32, ..info.clone() };
+    read_image(bytes, &top, order, packing)
 }
 
-/// Nikon Huffman-compressed strip (see [`super::nefc`]); the decode table is maker note `0x0096`.
-fn compressed(bytes: &[u8], info: &ImageInfo, mn: Option<&makernote::MakerNote>) -> Result<RawData> {
+/// Nikon Huffman-compressed strip (see [`super::nefc`]); the decode table is maker note `0x0096`. Decodes the first
+/// `rows` rows of the `info.height`.
+fn compressed(bytes: &[u8], info: &ImageInfo, mn: Option<&makernote::MakerNote>, rows: usize) -> Result<RawData> {
     let starts_with = |magic: &[u8]| {
         let start = info.chunks(bytes.len() as u64).first().and_then(|c| usize::try_from(c.offset).ok());
         start.and_then(|o| bytes.get(o..o.checked_add(magic.len())?)) == Some(magic)
@@ -223,7 +277,7 @@ fn compressed(bytes: &[u8], info: &ImageInfo, mn: Option<&makernote::MakerNote>)
     let end = last.offset.saturating_add(last.len).min(bytes.len() as u64);
     let src = usize::try_from(first.offset).ok().zip(usize::try_from(end).ok()).and_then(|(a, b)| bytes.get(a..b));
     let src = src.ok_or_else(|| RawError::Corrupt("NEF: image data outside the file".into()))?;
-    Ok(RawData::U16(nefc::decode(src, info.width as usize, info.height as usize, bits, &table)?))
+    Ok(RawData::U16(nefc::decode_rows(src, info.width as usize, info.height as usize, rows, bits, &table)?))
 }
 
 #[cfg(test)]
@@ -267,6 +321,49 @@ mod tests {
         TiffWriter::new(order, false).write(&[ifd0]).unwrap()
     }
 
+    /// A Z 6II NEF carrying NikonNEFInfo gets Nikon's distortion correction as one warp, in the header probe and
+    /// the full decode alike, and keeps it through DNG export; another body with the same data gets none.
+    #[test]
+    fn nikon_in_file_distortion_becomes_a_warp() {
+        use super::super::nef_lens::tests::{distortion_block, nef_info_blob, offset_block};
+        let (w, h) = (48u32, 32u32);
+        let file = |model: &str| {
+            let words: Vec<u8> = (0..w * h).flat_map(|i| (600 + (i % 97) as u16 * 50).to_be_bytes()).collect();
+            let mut raw = IfdBuilder::new();
+            raw.set(t::NEW_SUBFILE_TYPE, Value::Long(vec![0]));
+            raw.set(t::IMAGE_WIDTH, Value::Long(vec![w]));
+            raw.set(t::IMAGE_LENGTH, Value::Long(vec![h]));
+            raw.set(t::BITS_PER_SAMPLE, Value::Short(vec![14]));
+            raw.set(t::COMPRESSION, Value::Short(vec![1]));
+            raw.set(t::PHOTOMETRIC, Value::Short(vec![photometric::CFA]));
+            raw.set(t::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+            raw.set(t::CFA_PATTERN_EP, Value::Byte(vec![0, 1, 1, 2]));
+            let info = nef_info_blob(&[
+                (0x0005, distortion_block(3, 21.6, 4, [0.039895, 0.019211, -0.127218], -0.025043)),
+                (0x0008, offset_block(1.5, -0.75)),
+            ]);
+            raw.set(0xc7d5, Value::Undefined(info));
+            raw.set_image(ImageData::Strips { rows_per_strip: h, strips: vec![words] });
+            let mut ifd0 = IfdBuilder::new();
+            ifd0.set(t::MAKE, Value::Ascii("NIKON CORPORATION".into()));
+            ifd0.set(t::MODEL, Value::Ascii(model.into()));
+            ifd0.add_sub_ifd(raw);
+            TiffWriter::new(ByteOrder::Little, false).write(&[ifd0]).unwrap()
+        };
+        let bytes = file("NIKON Z 6_2");
+        let header = decode(&bytes, Mode::Header).unwrap();
+        let full = decode(&bytes, Mode::Full).unwrap();
+        assert_eq!(header.info(), full.info());
+        assert_eq!(header.opcodes.list3, full.opcodes.list3);
+        let [crate::Opcode::WarpRectilinear { planes, center }] = full.opcodes.list3.as_slice() else { panic!("{:?}", full.opcodes.list3) };
+        assert!((planes[0][0] - 1.0 / (1.0 - 0.025043)).abs() < 1e-5, "{planes:?}");
+        assert!((center[0] * 47.0 - (23.5 + 1.5)).abs() < 0.01 && (center[1] * 31.0 - (15.5 - 0.75)).abs() < 0.01, "{center:?}");
+        let dng = crate::write_dng(&full, &Default::default()).unwrap();
+        assert_eq!(crate::decode(&dng).unwrap().opcodes.list3, full.opcodes.list3);
+        full.develop(crate::Method::Bilinear).unwrap();
+        assert!(decode(&file("NIKON D850"), Mode::Full).unwrap().opcodes.list3.is_empty());
+    }
+
     #[test]
     fn preview_color_space_is_read_from_the_nikon_note() {
         for (value, expected) in [(1, Some(crate::PreviewColorSpace::Srgb)), (2, Some(crate::PreviewColorSpace::AdobeRgb)), (3, None)] {
@@ -277,6 +374,45 @@ mod tests {
         }
         assert_eq!(crate::embedded_preview_color_space(&nef(1, 14, vec![vec![0; 128]], 8, 8, 8)), None);
         assert_eq!(crate::embedded_preview_color_space(b"not a TIFF"), None);
+    }
+
+    /// Issue #778: any make's raw falls back to its EXIF ColorSpace, with Uncalibrated + InteropIndex "R03" read as
+    /// Adobe RGB; the Nikon note wins; a DNG is left alone.
+    #[test]
+    fn preview_color_space_falls_back_to_the_exif_color_space() {
+        let file = |make: &str, cs: u16, interop: Option<&str>, note: Option<u16>, dng: bool| {
+            let mut exif = IfdBuilder::new();
+            exif.set(0xA001, Value::Short(vec![cs]));
+            if let Some(i) = interop {
+                let mut io = IfdBuilder::new();
+                io.set(0x0001, Value::Ascii(i.into()));
+                exif.set_child(t::INTEROP_IFD, io);
+            }
+            if let Some(v) = note {
+                let mut mn = IfdBuilder::new();
+                mn.set(0x001e, Value::Short(vec![v]));
+                let mut bytes = b"Nikon   ".to_vec();
+                bytes.extend(TiffWriter::new(ByteOrder::Little, false).write(&[mn]).unwrap());
+                exif.set(t::MAKER_NOTE, Value::Undefined(bytes));
+            }
+            let mut ifd0 = IfdBuilder::new();
+            ifd0.set(t::MAKE, Value::Ascii(make.into()));
+            if dng {
+                ifd0.set(t::DNG_VERSION, Value::Byte(vec![1, 4, 0, 0]));
+            }
+            ifd0.set_child(t::EXIF_IFD, exif);
+            TiffWriter::new(ByteOrder::Little, false).write(&[ifd0]).unwrap()
+        };
+        use crate::PreviewColorSpace::{AdobeRgb, Srgb};
+        let f = crate::embedded_preview_color_space;
+        assert_eq!(f(&file("SONY", 0xFFFF, Some("R03"), None, false)), Some(AdobeRgb));
+        assert_eq!(f(&file("SONY", 1, Some("R98"), None, false)), Some(Srgb));
+        assert_eq!(f(&file("SONY", 0xFFFF, Some("R98"), None, false)), None);
+        assert_eq!(f(&file("SONY", 0xFFFF, None, None, false)), None);
+        assert_eq!(f(&file("Canon", 0xFFFF, Some("R03"), None, false)), Some(AdobeRgb));
+        assert_eq!(f(&file("NIKON CORPORATION", 1, Some("R98"), Some(2), false)), Some(AdobeRgb));
+        assert_eq!(f(&file("NIKON CORPORATION", 0xFFFF, Some("R03"), None, false)), Some(AdobeRgb));
+        assert_eq!(f(&file("Canon", 0xFFFF, Some("R03"), None, true)), None);
     }
 
     #[test]
@@ -325,6 +461,76 @@ mod tests {
             assert_eq!(other.crop, Rect::new(0, 0, w, h));
             assert_ne!(other.white, vec![15520.0]);
         }
+    }
+
+    /// Issue #1248: the D7100 records no CropArea, and its data holds picture beyond Lightroom's frame in both
+    /// image areas (full frame and 1.3x crop), so renders came out larger and Lightroom crops landed off.
+    #[test]
+    fn measured_d7100_image_area() {
+        let decode_as = |model: &str, (w, h): (usize, usize)| {
+            let mut nef = nef(1, 14, vec![vec![0x10; w * h * 2]], w as u32, h as u32, h as u32);
+            // the fixture's model is "NIKON TEST" plus its NUL: 11 bytes to overwrite
+            let at = nef.windows(11).position(|b| b == b"NIKON TEST\0").unwrap();
+            let name = format!("{model:\0<11}");
+            nef[at..at + 11].copy_from_slice(name.as_bytes());
+            crate::decode(&nef).unwrap()
+        };
+        for (size, crop) in [((6036, 4020), Rect::new(18, 10, 6000, 4000)), ((4812, 3212), Rect::new(6, 6, 4800, 3200))] {
+            let d7100 = decode_as("NIKON D7100", size);
+            assert_eq!(d7100.crop, crop);
+            assert_eq!((d7100.metadata.width, d7100.metadata.height), (Some(crop.width as u32), Some(crop.height as u32)));
+            assert_ne!(d7100.white, vec![15520.0]);
+            let developed = d7100.develop(crate::Method::Bilinear).unwrap();
+            assert_eq!((developed.width, developed.height), (crop.width, crop.height));
+            assert_eq!(decode_as("NIKON D7200", size).crop, Rect::new(0, 0, size.0, size.1));
+        }
+    }
+
+    /// The D90's last 42 columns are filler at a flat ~254, above its dark image samples: without the measured
+    /// area they stay in the image and develop as a pink band on the right.
+    #[test]
+    fn measured_d90_drops_the_filler_columns() {
+        let (w, h) = (4352usize, 2868usize);
+        let mut px = vec![40u16; w * h];
+        for row in px.chunks_mut(w) {
+            row[4310..].fill(254);
+        }
+        let mut nef = nef(1, 12, vec![px.iter().flat_map(|v| v.to_le_bytes()).collect()], w as u32, h as u32, h as u32);
+        let at = nef.windows(10).position(|b| b == b"NIKON TEST").unwrap();
+        nef[at..at + 10].copy_from_slice(b"NIKON D90 ");
+        let d90 = crate::decode(&nef).unwrap();
+        assert_eq!(d90.crop, Rect::new(10, 10, 4288, 2848));
+        assert!(d90.crop.x + d90.crop.width <= 4310, "the filler columns are outside the image");
+        assert_eq!(d90.white, vec![3830.0]);
+        assert_eq!((d90.metadata.width, d90.metadata.height), (Some(4288), Some(2848)));
+    }
+
+    /// Issue #708: the active width is judged from the first [`MASK_ROWS`] rows in both modes, so the header probe
+    /// (which reads only those rows' strips) and the full decode agree whether the masked columns are there or not.
+    #[test]
+    fn masked_columns_are_judged_from_the_top_rows_in_both_modes() {
+        let (w, h, rps) = (256usize, MASK_ROWS + 64, 8u32);
+        let file = |masked_rows: std::ops::Range<usize>| {
+            let words: Vec<u8> = (0..w * h)
+                .map(|i| if masked_rows.contains(&(i / w)) && i % w >= w - 8 { 0u16 } else { 1000 + (i % 7) as u16 })
+                .flat_map(|v| v.to_be_bytes())
+                .collect();
+            nef(1, 14, words.chunks(w * 2 * rps as usize).map(|c| c.to_vec()).collect(), w as u32, h as u32, rps)
+        };
+        for (masked_rows, expected_width) in [(0..h, w - 8), (0..MASK_ROWS, w - 8), (MASK_ROWS..h, w), (0..0, w)] {
+            let bytes = file(masked_rows.clone());
+            let full = crate::decode(&bytes).unwrap();
+            assert_eq!(full.active_area.width, expected_width, "masked rows {masked_rows:?}");
+            assert_eq!(full.crop.width, expected_width);
+            assert_eq!(crate::probe_info(&bytes).unwrap(), full.info(), "masked rows {masked_rows:?}");
+        }
+        // the shared rule on its own: nominal white, trailing columns at most 64, even width
+        let d: Vec<u16> = (0..w * 4).map(|i| if i % w >= w - 9 { 0 } else { 600 }).collect();
+        assert_eq!(trailing_masked_columns(&d, w, 14), w - 10, "nine dark columns trim to an even width");
+        assert_eq!(trailing_masked_columns(&d, w, 12), w - 10);
+        assert_eq!(trailing_masked_columns(&d[..w - 1], w, 14), w, "less than a row of samples leaves the width alone");
+        assert_eq!(trailing_masked_columns(&[0; 64], 64, 14), 64, "narrow images are left alone");
+        assert_eq!(trailing_masked_columns(&[], 0, 14), 0);
     }
 
     #[test]

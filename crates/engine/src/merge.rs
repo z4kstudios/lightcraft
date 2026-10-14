@@ -110,7 +110,9 @@ impl MergeJob {
             .par_iter()
             .map(|(_, path)| {
                 let bytes = (self.read)(path)?;
-                let f = lightcraft_merge::load_frame(&bytes, self.preview, orient).map_err(|e| format!("{path}: {e}"));
+                // a raw without colour matrices of its own starts from the colour it has when opened alone (#965)
+                let f = lightcraft_merge::load_frame_with(&bytes, self.preview, orient, &crate::camera_preview::starting_colour_tags)
+                    .map_err(|e| format!("{path}: {e}"));
                 let k = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 progress(span.0 + (span.1 - span.0) * k as f32 / n as f32, "Reading photos");
                 f
@@ -128,11 +130,14 @@ impl MergeJob {
             return Err("cancelled".into());
         }
         let sub = |a: f32, b: f32| move |f: f32, s: &str| progress(a + (b - a) * f, s);
+        // the reference frame's lens corrections (HDR); panoramas carry none
+        let mut lens = Vec::new();
         let (image, color, orientation, metadata, baseline, samples, crop, mut info, ghost) = match &self.kind {
             MergeKind::Hdr { hdr } => {
                 let frames = self.load(false, progress, (0.0, 0.3))?;
                 let p = sub(0.3, 0.9);
-                let r = lightcraft_merge::merge_hdr(frames, hdr, &p).map_err(err)?;
+                let mut r = lightcraft_merge::merge_hdr(frames, hdr, &p).map_err(err)?;
+                lens = std::mem::take(&mut r.lens);
                 let info = json!({
                     "reference": self.sources[r.reference].0.0,
                     "ev": r.ev, "evExif": r.ev_exif,
@@ -181,6 +186,7 @@ impl MergeJob {
                         orientation: r.orientation,
                         metadata: r.metadata,
                         baseline_exposure: r.baseline_exposure,
+                        lens: Vec::new(),
                     };
                     f.orient();
                     merged.push(f);
@@ -212,7 +218,7 @@ impl MergeJob {
             metadata.caption = Some(format!("Merged from {}", names.join(", ")));
         }
         metadata.software = Some("LightCraft Photo Merge".into());
-        let dng = lightcraft_merge::write_linear_dng(&image, &color, orientation, &metadata, baseline, samples).map_err(err)?;
+        let dng = lightcraft_merge::write_linear_dng(&image, &color, orientation, &metadata, baseline, samples, &lens).map_err(err)?;
         info["width"] = json!(image.width);
         info["height"] = json!(image.height);
         let preview = match self.preview {

@@ -279,12 +279,14 @@ impl Op {
             | Op::SetVersions { id, .. }
             | Op::SetHistory { id, .. }
             | Op::PushHistory { id, .. }
+            | Op::SetHistoryCursor { id, .. }
             | Op::SetCaptured { id, .. }
             | Op::SetAnalysis { id, .. }
             | Op::SetFile { id, .. }
             | Op::Relink { id, .. }
             | Op::SetContent { id, .. }
-            | Op::SetEmbeddedLens { id, .. } => out(*id),
+            | Op::SetEmbeddedLens { id, .. }
+            | Op::SetAsShotWb { id, .. } => out(*id),
             Op::AddAlbum { album } => {
                 album.photos.iter().for_each(|p| out(*p));
                 album.cover.into_iter().for_each(&mut *out);

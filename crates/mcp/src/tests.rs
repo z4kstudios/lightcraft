@@ -2,6 +2,13 @@ use serde_json::{Value, json};
 
 use crate::{Backend, Headless, PROTOCOL_VERSION, Server, call_tool, command_tool_name};
 
+/// An undated file takes its own date (#1216): give the fixture the date its folder template expects (noon UTC,
+/// the same day in every time zone the tests run in).
+fn file_dated_2026_01_14(path: &std::path::Path) {
+    let noon = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_768_392_000);
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(noon).unwrap();
+}
+
 fn server() -> Server {
     Server::new(Box::new(Headless::demo()))
 }
@@ -82,6 +89,7 @@ fn import_tool_copies_with_a_folder_template() {
     let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[20, 3, 9, 255]; 64] };
     let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
     std::fs::write(src.join("a.png"), png).unwrap();
+    file_dated_2026_01_14(&src.join("a.png"));
     let mut b = Headless::demo();
     b.session.clock = Box::new(|| "2026-01-14T05:58:48".to_string());
     let args =
@@ -152,6 +160,99 @@ fn export_tool_forwards_its_advertised_options() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Issue #236: `app.export {addToPhotos, photosAlbum}` through the headless backend (the MCP
+/// `export` tool, `lightcraft-cli run`): the files written go to Photos and the result says how
+/// it went; where Photos isn't (not macOS), it is refused before anything is written. A fake
+/// runner replaces the real one first: tests never start osascript or Photos.
+#[test]
+fn export_adds_to_apple_photos_where_there_is_photos() {
+    use std::sync::{Arc, Mutex};
+    let mut b = Headless::demo();
+    let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+    let c = calls.clone();
+    b.session.apple_photos = Some(Arc::new(move |args: &[String], _| {
+        c.lock().unwrap().push(args.to_vec());
+        Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID-1/L0/001\n".into(), stderr: String::new() })
+    }));
+    let base = std::env::temp_dir().join(format!("lc-mcp-export-photos-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let r = call_tool(&mut b, "export", &json!({"dir": base.to_string_lossy(), "longEdge": 32, "addToPhotos": true, "photosAlbum": "From \"MCP\""}));
+    if cfg!(target_os = "macos") {
+        assert!(!r.is_error, "{r:?}");
+        let out = r.structured.unwrap();
+        assert_eq!(out["applePhotos"]["imported"], 1, "{out}");
+        assert_eq!(out["applePhotos"]["album"], "From \"MCP\"");
+        let written = out["files"][0]["path"].as_str().unwrap().to_string();
+        let args = calls.lock().unwrap().clone();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].last(), Some(&written));
+    } else {
+        assert!(r.is_error, "{r:?}");
+        assert!(format!("{:?}", r.content).contains("only available on macOS"), "{r:?}");
+        assert!(!base.exists(), "nothing written");
+        assert!(calls.lock().unwrap().is_empty());
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Review of #236: a one-shot process (`lightcraft-cli run`, an MCP server reaching EOF) must not
+/// end in the middle of an Apple Photos import, abandoning osascript and the result. The test runs
+/// itself as a child process (`LC_PHOTOS_CHILD`): the child adds a file with a fake runner that
+/// takes a while and then leaves a marker, prints the reply and ends as the CLI does (dropping
+/// its backend). The parent checks the import had finished: by default the call waited for
+/// Photos, and with `wait: false` the backend waited before the process ended. Never osascript:
+/// the child's session has no file-system hooks and only the fake runner.
+#[test]
+fn a_one_shot_process_never_ends_during_a_photos_import() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    if let (Ok(dir), Ok(mode)) = (std::env::var("LC_PHOTOS_CHILD"), std::env::var("LC_PHOTOS_CHILD_MODE")) {
+        let dir = std::path::PathBuf::from(dir);
+        let file = dir.join("a.jpg");
+        let marker = dir.join("imported");
+        let mut h = Headless::new(lightcraft_engine::Session::with_demo());
+        h.session.apple_photos = Some(Arc::new(move |args: &[String], _| {
+            std::thread::sleep(Duration::from_millis(400));
+            std::fs::write(&marker, args.last().cloned().unwrap_or_default()).unwrap();
+            Ok(lightcraft_engine::apple_photos::Output { status: Some(0), stdout: "ID-1\n".into(), stderr: String::new() })
+        }));
+        let mut p = json!({"paths": [file.to_string_lossy()]});
+        if mode == "nowait" {
+            p["wait"] = json!(false);
+        }
+        let r = h.call("engine.execute", json!({"command": "export.addToPhotos", "params": p})).unwrap();
+        println!("CHILD-REPLY {r}");
+        drop(h); // what lightcraft-cli does before it exits
+        return;
+    }
+    for mode in ["default", "nowait"] {
+        let dir = std::env::temp_dir().join(format!("lc-mcp-photos-child-{mode}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"jpeg").unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::a_one_shot_process_never_ends_during_a_photos_import", "--nocapture", "--test-threads=1"])
+            .env("LC_PHOTOS_CHILD", &dir)
+            .env("LC_PHOTOS_CHILD_MODE", mode)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{mode}: {stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        let reply: Value = stdout
+            .lines()
+            .find_map(|l| l.split_once("CHILD-REPLY ").map(|(_, j)| serde_json::from_str(j).unwrap()))
+            .unwrap_or_else(|| panic!("{mode}: no reply in {stdout}"));
+        let marker = std::fs::read_to_string(dir.join("imported")).unwrap_or_else(|_| panic!("{mode}: the process ended before the import did"));
+        assert!(marker.ends_with("a.jpg"), "{marker}");
+        if mode == "default" {
+            assert_eq!((reply["running"].as_bool(), reply["imported"].as_u64()), (Some(false), Some(1)), "waited: {reply}");
+        } else {
+            assert_eq!(reply["running"], true, "{reply}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// The `import` helper moves: renamed into the folder template, the source removed.
 #[test]
 fn import_tool_moves_with_a_folder_template() {
@@ -162,6 +263,7 @@ fn import_tool_moves_with_a_folder_template() {
     let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[21, 3, 9, 255]; 64] };
     let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
     std::fs::write(src.join("sample.png"), png).unwrap();
+    file_dated_2026_01_14(&src.join("sample.png"));
     let mut b = Headless::demo();
     b.session.clock = Box::new(|| "2026-01-14T05:58:48".to_string());
     let args = json!({"paths": [src.to_string_lossy()], "mode": "move", "destination": dest.to_string_lossy(),

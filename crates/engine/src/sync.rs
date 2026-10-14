@@ -74,10 +74,14 @@ impl SyncProgress {
 pub struct SyncInput {
     folder: String,
     scan: ScanInput,
-    /// The library's photos in the folder, each with how its sidecar is named.
-    photos: Vec<(Arc<Photo>, SidecarNaming)>,
-    /// For the colour label names a sidecar may use.
-    labels: Catalog,
+    /// The library's photos in the folder.
+    ids: Vec<PhotoId>,
+    /// How the library names sidecars; how each photo's is named is worked out by the scan (a
+    /// pass over the library, which the session's thread does not wait for).
+    naming: SidecarNaming,
+    /// The library as it is now (the one the scan looks files up in): for those photos, their
+    /// sidecars' names and the colour label names a sidecar may use.
+    labels: Arc<Catalog>,
 }
 
 /// What changed in a folder since it came into the library.
@@ -176,10 +180,9 @@ impl SyncInput {
         if !disk && (lightcraft_catalog::folders::is_disk_root(path) || crate::cmd::library::covers_other_disks(s, path, &ids)) {
             return Err(invalid(format!("{path} is a whole disk or holds disks: pass `disk: true` to synchronize it")));
         }
-        let namings = s.sidecar_namings(&ids);
-        let photos = ids.iter().zip(namings).filter_map(|(id, naming)| s.catalog.photo(*id).map(|p| (Arc::clone(p), naming))).collect();
         let (scan, _) = ScanInput::new(s, &[path.to_string()]);
-        Ok(SyncInput { folder: path.to_string(), scan, photos, labels: s.catalog.clone() })
+        let labels = scan.library();
+        Ok(SyncInput { folder: path.to_string(), scan, ids, naming: s.xmp.naming, labels })
     }
 }
 
@@ -190,11 +193,16 @@ impl SyncInput {
 /// library's photos, which run on several threads too. Stops early when `progress.files.cancel`
 /// is set.
 pub fn scan_with(input: SyncInput, progress: &SyncProgress) -> FolderChanges {
-    let SyncInput { folder, scan, photos, labels } = input;
-    let seen: Vec<Arc<Photo>> = photos.iter().map(|(p, _)| Arc::clone(p)).collect();
+    let SyncInput { folder, scan, ids, naming, labels } = input;
+    let seen: Vec<Arc<Photo>> = ids.iter().filter_map(|id| labels.photo(*id)).map(Arc::clone).collect();
     if !cfg!(target_arch = "wasm32") && !Path::new(&folder).is_dir() {
         return FolderChanges { path: folder, seen, offline: true, ..Default::default() };
     }
+    // (how each photo's sidecar is named: a pass over the library, made here and not while the
+    // session waits, and not at all for a folder that is not there)
+    let namings = crate::sidecar::namings_in(&labels, naming, &ids);
+    let photos: Vec<(Arc<Photo>, SidecarNaming)> =
+        ids.iter().zip(namings).filter_map(|(id, naming)| labels.photo(*id).map(|p| (Arc::clone(p), naming))).collect();
     // (no threads on the web: one after the other there)
     #[cfg(target_arch = "wasm32")]
     let (out, checks) = (crate::import::scan_with(scan, std::slice::from_ref(&folder), &progress.files), check_photos(&photos, &labels, progress));

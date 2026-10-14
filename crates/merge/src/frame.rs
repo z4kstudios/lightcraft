@@ -6,7 +6,7 @@ use lightcraft_geom::Orientation;
 use lightcraft_meta::Metadata;
 use lightcraft_raster::Rgb32f;
 use lightcraft_raster::resample::{Filter, fit};
-use lightcraft_raw::ColorData;
+use lightcraft_raw::{ColorData, Opcode};
 
 use crate::{MergeError, Result};
 
@@ -36,6 +36,10 @@ pub struct Frame {
     pub metadata: Metadata,
     /// Raw files: the source's `BaselineExposure` (EV), carried into the output.
     pub baseline_exposure: f64,
+    /// Raw files: the lens corrections the source applies (`WarpRectilinear`, `WarpRectilinear2`, `FixVignetteRadial`,
+    /// in order), re-expressed for `image` (the default crop, not yet turned), for the merged DNG to carry. Empty for
+    /// other sources and once [`Frame::orient`] has turned the pixels.
+    pub lens: Vec<Opcode>,
 }
 
 impl Frame {
@@ -53,6 +57,7 @@ impl Frame {
             orientation: Orientation::Normal,
             metadata: Metadata::default(),
             baseline_exposure: 0.0,
+            lens: Vec::new(),
         }
     }
 
@@ -63,11 +68,12 @@ impl Frame {
         self.image.height
     }
 
-    /// Apply the display orientation to the pixels.
+    /// Apply the display orientation to the pixels. The lens corrections, written for the unturned pixels, are dropped.
     pub fn orient(&mut self) {
         if self.orientation != Orientation::Normal {
             self.image = self.image.oriented(self.orientation);
             self.orientation = Orientation::Normal;
+            self.lens.clear();
         }
     }
 }
@@ -103,15 +109,42 @@ pub fn detect_clip(img: &Rgb32f) -> f32 {
     if maxv >= 1.0 || piled { level * 0.995 } else { 1.0 }
 }
 
+/// The colour tags a raw source starts from when the caller knows better than the file (`None`: the
+/// file's own tags). Called with the decoded raw, its samples still there, and the file's bytes.
+pub type RawColour<'a> = dyn Fn(&mut lightcraft_raw::RawImage, &[u8]) -> Option<ColorData> + Sync + 'a;
+
 /// Decode a photo (raw or standard format) into a frame no larger than `max_edge` (when given).
 /// `orient` applies the EXIF orientation to the pixels.
 pub fn load_frame(bytes: &[u8], max_edge: Option<usize>, orient: bool) -> Result<Frame> {
+    load_frame_with(bytes, max_edge, orient, &|_, _| None)
+}
+
+/// [`load_frame`] with a raw's colour tags from `colour`: a raw without colour matrices of its own
+/// (CR2, NEF, ARW…) starts from a colour the app works out (issue #965).
+pub fn load_frame_with(bytes: &[u8], max_edge: Option<usize>, orient: bool, colour: &RawColour) -> Result<Frame> {
     let metadata = lightcraft_meta::extract(bytes);
     let exposure = exif_exposure(&metadata);
     if lightcraft_raw::probe(bytes).is_some() {
         let mut raw = lightcraft_raw::decode(bytes).map_err(|e| MergeError::Decode(e.to_string()))?;
-        // geometric lens corrections stay with the develop settings ("profile corrections")
+        // Lens corrections stay with the develop settings ("profile corrections"): frames are merged uncorrected, and
+        // the output DNG carries the reference frame's corrections, re-expressed for the default crop `develop` keeps.
+        // The DNG 1.6 skip rule is applied here, so no `WarpRectilinear2` is left optional.
+        let (aw, ah) = (raw.active_area.width, raw.active_area.height);
+        let crop = raw.develop_crop(aw, ah);
+        let lens = lightcraft_raw::opcodes::applied_ops(&raw.opcodes.list3)
+            .filter(|op| op.is_lens_correction())
+            .filter_map(|op| op.cropped(aw, ah, crop))
+            .map(|op| match op {
+                Opcode::WarpRectilinear2 { planes, center, reciprocal, .. } => {
+                    Opcode::WarpRectilinear2 { planes, center, reciprocal, optional: false }
+                }
+                op => op,
+            })
+            .collect();
         raw.opcodes.list3.retain(|op| !op.is_lens_correction());
+        if let Some(color) = colour(&mut raw, bytes) {
+            raw.color = color;
+        }
         let small = max_edge.is_some_and(|m| m <= 1200);
         let method = if small { lightcraft_raw::Method::Bilinear } else { lightcraft_raw::Method::Ahd };
         let mut image = raw.develop(method).map_err(|e| MergeError::Decode(e.to_string()))?;
@@ -133,6 +166,7 @@ pub fn load_frame(bytes: &[u8], max_edge: Option<usize>, orient: bool) -> Result
             orientation: raw.orientation,
             metadata: if raw.metadata == Metadata::default() { metadata } else { raw.metadata.clone() },
             baseline_exposure: raw.color.baseline_exposure,
+            lens,
         };
         if f.exposure.is_none() {
             f.exposure = exif_exposure(&f.metadata);
@@ -163,6 +197,7 @@ pub fn load_frame(bytes: &[u8], max_edge: Option<usize>, orient: bool) -> Result
         orientation: Orientation::from_exif(d.orientation),
         metadata,
         baseline_exposure: 0.0,
+        lens: Vec::new(),
     };
     if orient {
         f.orient();

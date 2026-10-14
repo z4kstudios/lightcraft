@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first per-language measurement from the catalogs) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (the interface no longer decides on error text, a prerequisite for translating lower-layer errors) · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6
 
 How far each interface language is from `full`. How to add or maintain a language is in
 [localization.md](localization.md); per-language notes are in `localization-<code>.md`
@@ -73,7 +73,9 @@ Target languages LightCraft lacks: Italian, Korean, Dutch, Polish, Swedish, Norw
 ## Shared work before any language is `full` (counted once, ~20–35 h)
 
 - Route lower-layer error messages (catalog, raw, codecs, engine) through translatable message ids
-  instead of English `format!` strings (~12–20 h).
+  instead of English `format!` strings (~12–20 h). Translating them must not change what the app does:
+  since #1046 the interface decides on an error's kind (`lightcraft_engine::ErrorKind`, a download's or
+  Apple Photos import's `cancelled` flag), not its words; new decisions on an error go through a kind too.
 - A check in `cargo xtask ci` that every user-visible literal reaches a catalog (~4–8 h).
 - A user manual / help pages beyond What's New and the shortcut sheet (Lightroom links to online
   help; ~4–8 h for a translatable in-app help index).
@@ -89,4 +91,5 @@ Target languages LightCraft lacks: Italian, Korean, Dutch, Polish, Swedish, Norw
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-11 | minor | Shared work: the interface decides on error kinds, not English error text (#1046) |
 | 2026-10-10 | major | Created: per-language counts measured from the catalogs, the twelve key languages, script support, estimates |

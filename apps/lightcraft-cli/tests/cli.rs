@@ -476,6 +476,28 @@ fn connect_failure_hint_names_the_attempted_port() {
     assert!(!err.contains("--control 7980"), "{err}");
 }
 
+/// Issue #1178: `--connect 7980 ui.inspect` (after `lightcraft --control 7980`) was leaving
+/// `7980` unconsumed so it parsed as a command id and produced "unknown command `7980`".
+/// A bare port is now taken as `127.0.0.1:<port>`; the same address used with `:port` still
+/// works; non-numeric, non-`ADDR`-shaped tokens (e.g. a real command id) keep falling through.
+#[test]
+fn connect_bare_port_is_treated_as_loopback_port() {
+    // Bare port: the failure hint names that port.
+    let (ok, _lines, err) = run_cli(&["--connect", "18437", "ui.inspect"], None);
+    assert!(!ok);
+    assert!(err.contains("--control 18437"), "bare port must reach the hint: {err}");
+    assert!(!err.contains("--control 7980"), "{err}");
+    // `<host>:<port>` still works (issue #167 case).
+    let (ok, _lines, err) = run_cli(&["--connect", "127.0.0.1:18437", "ui.inspect"], None);
+    assert!(!ok);
+    assert!(err.contains("--control 18437"), "{err}");
+    // `--connect=<bare-port>` already worked (the `a.starts_with("--connect=")` arm); spot-check
+    // the hint matches its port too.
+    let (ok, _lines, err) = run_cli(&["--connect=18437", "ui.inspect"], None);
+    assert!(!ok);
+    assert!(err.contains("--control 18437"), "{err}");
+}
+
 /// The CLI logs warnings on stderr (#168): with `RUST_LOG=warn` an unknown GPU backend name is
 /// reported, and `RUST_LOG=off` silences it. Before, no logger was installed and nothing appeared.
 #[test]
@@ -576,4 +598,70 @@ fn snapshot_leaves_desktop_gpu_preferences_untouched() {
         assert!(!app_config.join("ui.json.tmp").exists());
         assert!(image.exists());
     }
+}
+
+/// `denoise-serve` serves the selected installed model; a client greets it and gets the CPU's answer for a tile
+/// (within half-float rounding on the wire), and a wrong token or a missing token variable is refused.
+#[cfg(feature = "denoise")]
+#[test]
+fn denoise_serve_runs_tiles_for_another_computer() {
+    use lightcraft_denoise::manifest::{DenoiserManifest, Domain, Gain};
+    use lightcraft_denoise::remote::Remote;
+    use lightcraft_denoise::run::TileRunner;
+    let models = tmp("denoise-models");
+    let _ = std::fs::remove_dir_all(&models);
+    let dir = models.join("synthetic");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = DenoiserManifest {
+        id: "synthetic".into(),
+        name: "Synthetic".into(),
+        version: "1".into(),
+        licence: Default::default(),
+        source: None,
+        sha256: None,
+        size_bytes: None,
+        provenance: "made for a test".into(),
+        domain: Domain::BayerToRgb,
+        tile: 64,
+        overlap: 16,
+        gain: Gain::None,
+    };
+    let onnx = dir.join("model.onnx");
+    std::fs::write(&onnx, lightcraft_denoise::synthetic::unet_onnx(64, 8, 2, 7)).unwrap();
+    std::fs::write(dir.join("denoise-model.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::write(models.join("settings.json"), r#"{"model": "synthetic"}"#).unwrap();
+    let sha = lightcraft_denoise::hash::sha256_file(&onnx).unwrap();
+
+    // without its token the server doesn't start
+    let o = Command::new(BIN).args(["denoise-serve", "--models", models.to_str().unwrap(), "--token-env", "LC_TEST_NO_SUCH_VAR"]).output().unwrap();
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("LC_TEST_NO_SUCH_VAR"));
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let addr = format!("127.0.0.1:{port}");
+    let token = "cli-test-token-0123456789";
+    let mut child = Command::new(BIN)
+        .args(["denoise-serve", "--models", models.to_str().unwrap(), "--listen", &addr, "--run-on", "cpu"])
+        .env("LIGHTCRAFT_DENOISE_TOKEN", token)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // wait for the banner
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut banner = String::new();
+    err.read_line(&mut banner).unwrap();
+    assert!(banner.contains("synthetic 1") && banner.contains(&addr), "{banner}");
+
+    let remote = Remote::new(&addr, token, &sha, 64);
+    let info = remote.hello().unwrap();
+    assert!(info.device.starts_with("CPU"), "{info:?}");
+    let (input, _) = lightcraft_denoise::runtime::test_tile(64);
+    let got = remote.try_run(&input).unwrap().unwrap();
+    let want = lightcraft_denoise::runtime::CpuRunner::load(&onnx, &manifest).unwrap().run(&input).unwrap();
+    let scale = want.iter().fold(1e-9f32, |m, v| m.max(v.abs()));
+    let worst = want.iter().zip(&got).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+    assert!(worst < 5e-3, "remote vs local: {worst}");
+    assert!(Remote::new(&addr, "a-wrong-token-000000", &sha, 64).hello().is_err());
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&models);
 }

@@ -125,6 +125,12 @@ pub enum Op {
         id: PhotoId,
         step: HistoryStep,
     },
+    /// Move the History cursor (see [`Photo::history_cursor`]) without changing the steps.
+    SetHistoryCursor {
+        id: PhotoId,
+        #[serde(default)]
+        cursor: Option<usize>,
+    },
     AddAlbum {
         album: Album,
     },
@@ -214,6 +220,13 @@ pub enum Op {
         id: PhotoId,
         lens: Option<Box<lightcraft_develop::EmbeddedLens>>,
     },
+    /// A raw's as-shot white balance (Kelvin, tint) as its file reads now: what a decode or Reload finds when the
+    /// camera's colour matrices give the file a Kelvin scale it was imported without (issue #730). Bookkeeping,
+    /// not an edit: the look does not change, only the As Shot readout.
+    SetAsShotWb {
+        id: PhotoId,
+        wb: Option<(f64, f64)>,
+    },
     /// The name shown for a colour label (`None` = its colour's name).
     SetLabelName {
         label: ColorLabel,
@@ -277,19 +290,21 @@ impl Catalog {
 
     // ---- ids
 
+    // (saturating: a counter a damaged snapshot left at the top hands out its last id again, which
+    // the op that adds it then refuses as taken, rather than overflowing)
     pub fn alloc_photo_id(&mut self) -> PhotoId {
         let id = PhotoId(self.next_photo.max(1));
-        self.next_photo = id.0 + 1;
+        self.next_photo = id.0.saturating_add(1);
         id
     }
     pub fn alloc_album_id(&mut self) -> AlbumId {
         let id = AlbumId(self.next_album.max(1));
-        self.next_album = id.0 + 1;
+        self.next_album = id.0.saturating_add(1);
         id
     }
     pub fn alloc_stack_id(&mut self) -> StackId {
         let id = StackId(self.next_stack.max(1));
-        self.next_stack = id.0 + 1;
+        self.next_stack = id.0.saturating_add(1);
         id
     }
 
@@ -484,7 +499,7 @@ impl Catalog {
                     return Err(CatalogError::Invalid(format!("photo {:?} exists", photo.id)));
                 }
                 let id = photo.id;
-                self.next_photo = self.next_photo.max(id.0 + 1);
+                self.next_photo = self.next_photo.max(id.0.saturating_add(1));
                 self.photos.insert(id, Arc::new(*photo));
                 Op::RemovePhoto { id }
             }
@@ -538,12 +553,25 @@ impl Catalog {
             Op::PushHistory { id, step } => {
                 let p = self.photo_mut(id)?;
                 let old = p.history.clone();
+                let old_cursor = p.history_cursor.take();
+                // a new edit made from an earlier step drops the steps after it
+                if let Some(c) = old_cursor {
+                    p.history.truncate(c.saturating_add(1));
+                }
                 p.history.push(step);
                 if p.history.len() > HISTORY_LIMIT {
                     let n = p.history.len() - HISTORY_LIMIT;
                     p.history.drain(..n);
                 }
-                Op::SetHistory { id, history: old }
+                if old_cursor.is_none() {
+                    Op::SetHistory { id, history: old }
+                } else {
+                    Op::Batch { ops: vec![Op::SetHistory { id, history: old }, Op::SetHistoryCursor { id, cursor: old_cursor }] }
+                }
+            }
+            Op::SetHistoryCursor { id, cursor } => {
+                let p = self.photo_mut(id)?;
+                Op::SetHistoryCursor { id, cursor: std::mem::replace(&mut p.history_cursor, cursor) }
             }
             Op::AddAlbum { album } => {
                 if self.albums.contains_key(&album.id) {
@@ -561,7 +589,7 @@ impl Catalog {
                     self.validate_rules(rules)?;
                 }
                 let id = album.id;
-                self.next_album = self.next_album.max(id.0 + 1);
+                self.next_album = self.next_album.max(id.0.saturating_add(1));
                 self.albums.insert(id, album);
                 Op::RemoveAlbum { id }
             }
@@ -581,13 +609,15 @@ impl Catalog {
                     if p == id || !self.albums.get(&p).is_some_and(|a| a.folder) {
                         return Err(CatalogError::Invalid("parent must be another folder".into()));
                     }
-                    // no cycles
+                    // no cycles (bounded: a loop elsewhere in a damaged catalog must not hang this)
                     let mut cur = Some(p);
+                    let mut steps = 0usize;
                     while let Some(c) = cur {
-                        if c == id {
+                        if c == id || steps > self.albums.len() {
                             return Err(CatalogError::Invalid("cannot move a folder into itself".into()));
                         }
                         cur = self.albums.get(&c).and_then(|a| a.parent);
+                        steps += 1;
                     }
                 }
                 let a = self.album_mut(id)?;
@@ -633,7 +663,7 @@ impl Catalog {
                 }
                 self.validate_stack(stack.id, &stack.photos)?;
                 let id = stack.id;
-                self.next_stack = self.next_stack.max(id.0 + 1);
+                self.next_stack = self.next_stack.max(id.0.saturating_add(1));
                 self.stacks.insert(id, stack);
                 Op::RemoveStack { id }
             }
@@ -684,6 +714,13 @@ impl Catalog {
             Op::SetEmbeddedLens { id, lens } => {
                 let p = self.photo_mut(id)?;
                 Op::SetEmbeddedLens { id, lens: std::mem::replace(&mut p.embedded_lens, lens.map(|l| *l)).map(Box::new) }
+            }
+            Op::SetAsShotWb { id, wb } => {
+                if wb.is_some_and(|(t, tint)| !(t.is_finite() && tint.is_finite())) {
+                    return Err(CatalogError::Invalid("as-shot white balance is not a number".into()));
+                }
+                let p = self.photo_mut(id)?;
+                Op::SetAsShotWb { id, wb: std::mem::replace(&mut p.as_shot_wb, wb) }
             }
             Op::SetFile { id, file_name, source } => {
                 if file_name.trim().is_empty() {
@@ -790,7 +827,94 @@ impl Catalog {
     }
 
     pub fn from_snapshot(s: &str) -> Result<Catalog> {
-        serde_json::from_str(s).map_err(|e| CatalogError::Corrupt(e.to_string()))
+        let mut c: Catalog = serde_json::from_str(s).map_err(|e| CatalogError::Corrupt(e.to_string()))?;
+        c.repair();
+        Ok(c)
+    }
+
+    /// Make a catalog read from a snapshot hold together where a damaged or hand-edited file left
+    /// it inconsistent, so nothing that relies on it can fail (code indexes stacks by the ids it
+    /// finds in them, and walks folders up to the top): every photo, album and stack carries the
+    /// id it is filed under; the id counters lie past every id in use; a stack keeps only photos
+    /// in the catalog, once each, and goes when fewer than two are left; an album whose parent is
+    /// missing, not a folder or inside itself moves to the top level. Returns what was changed
+    /// (nothing, for a catalog this build wrote).
+    pub fn repair(&mut self) -> Vec<String> {
+        let mut changed = Vec::new();
+        for (id, p) in self.photos.iter_mut() {
+            if p.id != *id {
+                changed.push(format!("photo {} was filed as {}", p.id.0, id.0));
+                Arc::make_mut(p).id = *id;
+            }
+        }
+        for (id, a) in self.albums.iter_mut() {
+            if a.id != *id {
+                changed.push(format!("album {} was filed as {}", a.id.0, id.0));
+                a.id = *id;
+            }
+        }
+        let photos = &self.photos;
+        self.stacks.retain(|id, st| {
+            if st.id != *id {
+                changed.push(format!("stack {} was filed as {}", st.id.0, id.0));
+                st.id = *id;
+            }
+            let mut seen = std::collections::HashSet::new();
+            let before = st.photos.len();
+            st.photos.retain(|p| photos.contains_key(p) && seen.insert(*p));
+            if st.photos.len() != before {
+                changed.push(format!("stack {}: {} missing or repeated photo(s) left out", id.0, before - st.photos.len()));
+            }
+            let keep = st.photos.len() >= 2;
+            if !keep {
+                changed.push(format!("stack {} had fewer than two photos: removed", id.0));
+            }
+            keep
+        });
+        // a photo in two stacks stays in the first
+        let mut stacked = std::collections::HashSet::new();
+        self.stacks.retain(|id, st| {
+            let before = st.photos.len();
+            st.photos.retain(|p| stacked.insert(*p));
+            if st.photos.len() != before {
+                changed.push(format!("stack {}: {} photo(s) already in another stack left out", id.0, before - st.photos.len()));
+            }
+            st.photos.len() >= 2
+        });
+        let parents: Vec<(AlbumId, Option<AlbumId>)> = self.albums.values().map(|a| (a.id, a.parent)).collect();
+        for (id, parent) in parents {
+            let Some(p) = parent else { continue };
+            let mut cur = Some(p);
+            let mut steps = 0usize;
+            let ok = loop {
+                match cur {
+                    None => break true,
+                    Some(c) if c == id || steps > self.albums.len() => break false,
+                    Some(c) => match self.albums.get(&c) {
+                        Some(a) if a.folder => cur = a.parent,
+                        _ => break false,
+                    },
+                }
+                steps += 1;
+            };
+            if !ok && let Some(a) = self.albums.get_mut(&id) {
+                changed.push(format!("album {}: its folder {} is missing, not a folder or inside it: moved to the top level", id.0, p.0));
+                a.parent = None;
+            }
+        }
+        let past = |last: Option<u64>| last.map_or(1, |v| v.saturating_add(1));
+        let (photo, album, stack) = (
+            past(self.photos.keys().last().map(|k| k.0)),
+            past(self.albums.keys().last().map(|k| k.0)),
+            past(self.stacks.keys().last().map(|k| k.0)),
+        );
+        if self.next_photo < photo || self.next_album < album || self.next_stack < stack {
+            changed.push("id counters behind the ids in use: moved past them".into());
+            self.next_photo = self.next_photo.max(photo);
+            self.next_album = self.next_album.max(album);
+            self.next_stack = self.next_stack.max(stack);
+        }
+        changed
     }
 
     /// Replay an op log (JSON lines) on top of `self`. A torn final line (crash mid-write) is ignored.
@@ -844,5 +968,7 @@ mod tests_journal;
 mod tests_local;
 #[cfg(test)]
 mod tests_lock;
+#[cfg(test)]
+mod tests_repair;
 #[cfg(test)]
 mod tests_torn_append;

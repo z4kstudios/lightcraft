@@ -26,12 +26,34 @@ pub struct ControlRequest {
     pub method: String,
     pub params: Value,
     pub reply: Sender<ControlResponse>,
+    /// Who has the request: [`PENDING`], [`TAKEN`] (the app runs it) or [`ABANDONED`] (the
+    /// sender gave up on it, so the app must not run it late: issue #718).
+    pub state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
+
+/// Queued, not yet run.
+pub const PENDING: u8 = 0;
+/// The app has started it: it will answer.
+pub const TAKEN: u8 = 1;
+/// Its sender gave up waiting (the window drew no frames): it is dropped unrun.
+pub const ABANDONED: u8 = 2;
 
 impl ControlRequest {
     pub fn new(method: impl Into<String>, params: Value) -> (Self, std::sync::mpsc::Receiver<ControlResponse>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (Self { method: method.into(), params, reply: tx }, rx)
+        (Self { method: method.into(), params, reply: tx, state: Default::default() }, rx)
+    }
+
+    /// Claim the request for running; false when its sender already gave up on it.
+    pub fn take(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.state.compare_exchange(PENDING, TAKEN, Ordering::SeqCst, Ordering::SeqCst).is_ok() || self.state.load(Ordering::SeqCst) == TAKEN
+    }
+
+    /// Give up on the request; false when the app has already started it (it will answer).
+    pub fn abandon(state: &std::sync::atomic::AtomicU8) -> bool {
+        use std::sync::atomic::Ordering;
+        state.compare_exchange(PENDING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_ok() || state.load(Ordering::SeqCst) == ABANDONED
     }
 }
 
@@ -96,6 +118,8 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
             "photo": p.0,
             "source": src,
             "pending": app.renderer.is_pending(crate::render::Slot::Main),
+            // why its render failed (the loupe then shows a stand-in, or nothing, for good)
+            "failed": app.renderer.failure_of(crate::render::Slot::Main, p),
             // zoomed past the whole-frame render: the window rendered at no more than 100 % (pixels of its frame)
             "region": app.region_view.map(|r| json!({"full": [r.full.0, r.full.1], "window": [r.window.x, r.window.y, r.window.w, r.window.h], "pending": app.renderer.is_pending(crate::render::Slot::Region)})),
             // …and the same for the Before side of a Before/After view
@@ -316,6 +340,11 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
             ok(Value::Null)
         }
         "ui.set" => {
+            // an arrangement of the sidebar is checked, not made whole as a settings file's is
+            let sidebar = match p.get("sidebar").map(crate::sidebar::SidebarLayout::parse).transpose() {
+                Ok(s) => s,
+                Err(e) => return err(e),
+            };
             let mut v = serde_json::to_value(&app.ui).unwrap_or_default();
             lightcraft_develop::presets::deep_merge(&mut v, p);
             match serde_json::from_value::<crate::UiState>(v) {
@@ -323,6 +352,23 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
                     if let Err(error) = crate::docking::set_widths(&mut u, p) {
                         return err(error);
                     }
+                    if let Some(sidebar) = sidebar {
+                        u.sidebar = sidebar;
+                    }
+                    // `collapsedSidebar`, as scripts from before `sidebar` set it: the folded sections
+                    if let Some(ids) = p.get("collapsedSidebar").and_then(Value::as_array) {
+                        use crate::sidebar::SidebarSection;
+                        if p.get("sidebar").is_some() {
+                            return err("ui.set: give `sidebar` or the older `collapsedSidebar`, not both".to_string());
+                        }
+                        if let Some(unknown) = ids.iter().find(|id| id.as_str().and_then(SidebarSection::from_id).is_none()) {
+                            return err(format!("ui.set: `collapsedSidebar`: unknown section {unknown} ({})", SidebarSection::ids()));
+                        }
+                        for section in SidebarSection::ALL {
+                            u.sidebar.set_collapsed(section, ids.iter().any(|id| id.as_str() == Some(section.id())));
+                        }
+                    }
+                    u.collapsed_sidebar.clear();
                     u.toast = app.ui.toast.clone();
                     u.dialog = app.ui.dialog.clone();
                     u.status = app.ui.status.clone();
@@ -472,13 +518,23 @@ pub fn export_active(app: &mut LightcraftApp, p: &Value) -> Result<Value, String
         return Err(NO_EXPORT_FOLDER.into());
     }
     let to = Destination { dir: dir.clone(), exact };
+    // Add to Apple Photos: refused here, before anything is written, when it can't be done
+    let after = app.session.after_export(&opts)?;
     let background = p.get("background").and_then(Value::as_bool).unwrap_or(false) && app.services.write_shared.is_some();
     let out = if background {
         let items = lightcraft_engine::export::prepare_batch(&mut app.session, &ids, &opts)?;
-        crate::export_task::start(app, items, opts, to)?
+        crate::export_task::start(app, items, opts, to, after)?
     } else {
         let w = app.services.write.as_mut().ok_or("no writer")?;
-        json!({"files": export_batch(&mut app.session, &ids, &opts, &to, &mut |path, bytes| w(path, bytes), &|path| std::path::Path::new(path).exists())?})
+        let files = export_batch(&mut app.session, &ids, &opts, &to, &mut |path, bytes| w(path, bytes), &|path| std::path::Path::new(path).exists())?;
+        let mut out = json!({"files": files});
+        // Photos may take minutes (and waits for the permission prompt): in the desktop app on a
+        // worker, never on this (UI) thread; the app announces the outcome and
+        // `export.photosImports` reports it. A window-less run (snapshot scripts) waits.
+        if let Some(photos) = after.finish(&app.session, &files) {
+            out["applePhotos"] = photos;
+        }
+        out
     };
     // remember for Export with Previous (and to prefill the dialog)
     let mut last = p.clone();

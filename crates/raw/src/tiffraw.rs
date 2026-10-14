@@ -47,6 +47,13 @@ pub fn check_image(data: &[u8], info: &ImageInfo) -> Result<usize> {
     if chunks.is_empty() {
         return Err(RawError::Corrupt("no image data chunks".into()));
     }
+    // every visible sample needs a chunk: a short offsets table would leave zero-filled (black) regions
+    let (across, down) = info.grid();
+    let planes = if info.planar == 2 { cpp } else { 1 };
+    let expected = (across as usize).saturating_mul(down as usize).saturating_mul(planes);
+    if chunks.len() < expected {
+        return Err(RawError::Corrupt(format!("{} image data chunks, expected {expected}", chunks.len())));
+    }
     // Plausibility bound before allocating: no supported coding stores more than ~2000 samples per byte
     // (Deflate of constant data is the extreme), so tiny files cannot trigger huge allocations.
     let available: u64 = chunks.iter().map(|c| chunk_bytes(data, c).map_or(0, |s| s.len() as u64)).sum();
@@ -102,21 +109,9 @@ pub fn read_image(data: &[u8], info: &ImageInfo, order: ByteOrder, packing: Pack
         chunks.par_iter().map(|c| decode_chunk(data, info, c, order, packing, ccpp, bits, float).map(|p| (*c, p))).collect();
     let mut out_u16 = if float { Vec::new() } else { vec![0u16; total] };
     let mut out_f32 = if float { vec![0f32; total] } else { Vec::new() };
-    let mut ok = 0usize;
-    let mut first_err = None;
     for r in decoded {
-        let (c, px) = match r {
-            Ok(v) => v,
-            Err(e) => {
-                // a JPEG XL tile that cannot be decoded is not a partial image: the file stays preview-only
-                if info.compression == comp::JPEG_XL {
-                    return Err(e);
-                }
-                first_err.get_or_insert(e);
-                continue;
-            }
-        };
-        ok += 1;
+        // a chunk that cannot be decoded is not a partial image: the file stays preview-only
+        let (c, px) = r?;
         let (cw, ch) = (c.width as usize, c.height as usize);
         let (x0, y0) = (c.x as usize, c.y as usize);
         if x0 >= w || y0 >= h {
@@ -149,9 +144,6 @@ pub fn read_image(data: &[u8], info: &ImageInfo, order: ByteOrder, packing: Pack
             }
         }
     }
-    if ok == 0 {
-        return Err(first_err.unwrap_or_else(|| RawError::Corrupt("no decodable chunks".into())));
-    }
     Ok(if float { RawData::F32(out_f32) } else { RawData::U16(out_u16) })
 }
 
@@ -168,8 +160,8 @@ fn decode_chunk(data: &[u8], info: &ImageInfo, c: &Chunk, order: ByteOrder, pack
         comp::JPEG => {
             let f = ljpeg::decode(src, n.saturating_mul(2).max(1 << 16))?;
             if f.data.len() < n {
-                // Some writers encode edge tiles smaller than nominal: accept a frame that covers the rows it has.
-                if f.data.is_empty() || f.data.len() % (cw * cpp) != 0 {
+                // Some writers encode edge tiles smaller than nominal: accept a frame that covers the rows inside the image.
+                if f.data.is_empty() || f.data.len() % (cw * cpp) != 0 || f.data.len() / (cw * cpp) < vh {
                     return Err(RawError::Corrupt(format!("lossless JPEG tile has {} samples, expected {n}", f.data.len())));
                 }
             }
@@ -376,5 +368,70 @@ mod lossy_tests {
         assert!((px(2, 3)[0] as i32 - 40).abs() <= 3 && (px(2, 3)[2] as i32 - 200).abs() <= 3, "{:?}", px(2, 3));
         assert!((px(20, 3)[0] as i32 - 220).abs() <= 3, "second tile: {:?}", px(20, 3));
         assert!((px(10, 5)[1] as i32 - 150).abs() <= 6, "green ramp: {:?}", px(10, 5));
+    }
+
+    fn strip_info(compression: u16, offsets: Vec<u64>, byte_counts: Vec<u64>) -> ImageInfo {
+        ImageInfo {
+            width: 4,
+            height: 4,
+            bits_per_sample: vec![8],
+            samples_per_pixel: 1,
+            compression,
+            photometric: 1,
+            planar: 1,
+            predictor: 1,
+            sample_format: 1,
+            new_subfile_type: 0,
+            layout: Layout::Strips { rows_per_strip: 2 },
+            offsets,
+            byte_counts,
+        }
+    }
+
+    /// A missing strip or a strip that fails to decode is an error, not a black band in a "successful" image.
+    #[test]
+    fn missing_or_failed_chunks_are_errors() {
+        let file = vec![9u8; 8 + 8];
+        // both strips present
+        let ok = strip_info(comp::NONE, vec![0, 8], vec![8, 8]);
+        assert!(read_image(&file, &ok, ByteOrder::Little, Packing::Msb).is_ok());
+        // the second strip has no offset
+        let missing = strip_info(comp::NONE, vec![0], vec![8]);
+        assert!(read_image(&file, &missing, ByteOrder::Little, Packing::Msb).is_err());
+        // the header-only read rejects it too, as the full decode will
+        assert!(read_image_in(crate::Mode::Header, &file, &missing, ByteOrder::Little, Packing::Msb).is_err());
+        // the second strip starts past the end of the file
+        let past_end = strip_info(comp::NONE, vec![0, 100], vec![8, 8]);
+        assert!(read_image(&file, &past_end, ByteOrder::Little, Packing::Msb).is_err());
+    }
+
+    /// A lossless-JPEG tile may be coded only as tall as the part inside the image, never shorter.
+    #[test]
+    fn short_lossless_jpeg_tiles_are_errors() {
+        let tile = |rows: usize| ljpeg::encode(&vec![300u16; 8 * rows], 8, rows, 1, 12, 1, 0);
+        let decode = |height: u32, rows: usize| {
+            let t = tile(rows);
+            let info = ImageInfo {
+                width: 8,
+                height,
+                bits_per_sample: vec![12],
+                samples_per_pixel: 1,
+                compression: comp::JPEG,
+                photometric: 32803,
+                planar: 1,
+                predictor: 1,
+                sample_format: 1,
+                new_subfile_type: 0,
+                layout: Layout::Tiles { tile_width: 8, tile_height: 8 },
+                offsets: vec![0],
+                byte_counts: vec![t.len() as u64],
+            };
+            read_image(&t, &info, ByteOrder::Little, Packing::Msb)
+        };
+        // an edge tile coded at its in-image height, and a full tile
+        assert_eq!(decode(6, 6), Ok(RawData::U16(vec![300; 8 * 6])));
+        assert_eq!(decode(8, 8), Ok(RawData::U16(vec![300; 8 * 8])));
+        // half of the visible rows are missing
+        assert!(decode(8, 4).is_err());
     }
 }
