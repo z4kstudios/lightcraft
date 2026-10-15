@@ -247,5 +247,8 @@
   "{n} photos opened for editing; each is stacked with its original": "{n}枚の写真を編集用に開きました。それぞれ元の写真とスタックされています",
   "{name} opened in the other editor": "{name}を別のエディタで開きました",
   "{n} originals opened in the other editor": "{n}個の元ファイルを別のエディタで開きました",
-  "· {in_source} identical copies": "・同一のコピー {in_source} 件"
+  "· {in_source} identical copies": "・同一のコピー {in_source} 件",
+  "{count} more warnings.": "ほかに{count}件の警告があります。",
+  "{photos} catalog records processed; {collections} collections.": "カタログの{photos}件のレコードを処理しました。コレクションは{collections}件です。",
+  "{missing} originals are missing. Their catalog records are available; use Find Missing Photos to relink them.": "{missing}件のオリジナルが見つかりません。カタログのレコードは利用できます。「見つからない写真を検索」で再リンクしてください。"
 }

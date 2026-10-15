@@ -226,6 +226,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::RenameAlbum { .. } => "Rename Album",
         Dialog::Rename { .. } => "Rename Photos",
         Dialog::Import { .. } => "Import Photos",
+        Dialog::LightroomResult { .. } => "Lightroom Catalog Import",
         Dialog::LabelNames { .. } => "Edit Color Label Names",
         Dialog::CaptureTime { .. } => "Edit Capture Time",
         Dialog::RenameKeyword { .. } => "Rename Keyword",
@@ -345,6 +346,20 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 }
                 Dialog::DenoiseModel { info, accepted } => crate::panels::denoise::model_dialog(app, ui, &t, info, accepted),
                 Dialog::FaceModel { info, accepted, .. } => crate::panels::faces::model_dialog(app, ui, &t, info, accepted),
+                Dialog::LightroomResult { summary, library, details, .. } => {
+                    ui.label(summary.as_str());
+                    ui.add_space(8.0);
+                    if let Some(library) = library {
+                        ui.label(crate::i18n::tr("Destination library"));
+                        ui.add(egui::Label::new(library.as_str()).wrap().selectable(true));
+                        ui.label(crate::i18n::tr("Lightroom catalogs import into the open library; no separate catalog folder is created."));
+                    } else {
+                        ui.label(crate::i18n::tr("These photos are only in memory. Open a library on disk and import the catalog again to save them."));
+                    }
+                    for detail in details.iter() {
+                        ui.add(egui::Label::new(detail).wrap().selectable(true));
+                    }
+                }
                 Dialog::SystemInfo { rows } => {
                     egui::Grid::new("sysinfo").num_columns(2).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
                         for (k, v) in rows.iter() {
@@ -1199,6 +1214,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 // only shows something (one Close, no Cancel / OK)
                 let unusable_model = matches!(&dlg, Dialog::DenoiseModel { info, .. } | Dialog::FaceModel { info, .. } if info["kind"] == "unsupported");
                 let informational = unusable_model
+                    || matches!(dlg, Dialog::LightroomResult { first: None, .. })
                     || matches!(
                         dlg,
                         Dialog::About | Dialog::Shortcuts | Dialog::Settings { .. } | Dialog::SystemInfo { .. } | Dialog::AllMetadata { .. } | Dialog::WhatsNew
@@ -1210,6 +1226,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                 let cancel = match &dlg {
                     Dialog::SamModel { .. } if sam_running || sam_installed || sam_nowhere => "Close",
                     Dialog::SamModel { .. } => "Not Now",
+                    Dialog::LightroomResult { .. } => "Close",
                     _ => "Cancel",
                 };
                 if !informational {
@@ -1227,6 +1244,7 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         add_label = crate::i18n::tr_format!("{verb} {n} Photo{}", if n == 1 { "" } else { "s" }, verb = crate::i18n::tr(verb), n = n);
                         add_label.as_str()
                     }
+                    Dialog::LightroomResult { first: Some(_), .. } => "Show in Library",
                     Dialog::ContactSheet { .. } => "Choose PDF…",
                     Dialog::Merge { .. } => "Merge",
                     Dialog::DenoiseModel { info, .. } if info["download"].is_string() => "Accept & Download",
@@ -1552,6 +1570,20 @@ pub(crate) fn album_entries(cat: &lightcraft_catalog::Catalog, editing: Option<u
 
 pub fn confirm_dialog(app: &mut LightcraftApp, dlg: &Dialog) -> Result<serde_json::Value, String> {
     match dlg {
+        Dialog::LightroomResult { first, .. } => {
+            if let Some(first) = first {
+                app.run("library.source", json!({"kind": "all"}))?;
+                let mut filter = serde_json::to_value(lightcraft_catalog::Filter::default()).map_err(|e| e.to_string())?;
+                // The filter command merges a patch; these defaults are omitted by serde.
+                filter["only"] = json!([]);
+                filter["labels"] = json!([]);
+                filter["ruleSet"] = serde_json::Value::Null;
+                app.run("library.filter", filter)?;
+                app.run("library.select", json!({"ids": [first]}))?;
+                app.ui.view = crate::state::ViewMode::PhotoGrid;
+            }
+            Ok(serde_json::Value::Null)
+        }
         Dialog::SamModel { then, .. } => {
             if app.session.segmenter.installed() {
                 // installed: start what the user was doing

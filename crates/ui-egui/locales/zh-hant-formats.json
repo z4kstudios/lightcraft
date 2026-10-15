@@ -247,5 +247,8 @@
   "{n} photos opened for editing; each is stacked with its original": "已開啟 {n} 張相片進行編輯；每張都與其原始相片堆疊在一起",
   "{name} opened in the other editor": "已在其他編輯器中開啟 {name}",
   "{n} originals opened in the other editor": "已在其他編輯器中開啟 {n} 個原始檔案",
-  "· {in_source} identical copies": "· {in_source} 個相同副本"
+  "· {in_source} identical copies": "· {in_source} 個相同副本",
+  "{count} more warnings.": "另有 {count} 則警告。",
+  "{photos} catalog records processed; {collections} collections.": "已處理 {photos} 筆目錄記錄；{collections} 個收藏集。",
+  "{missing} originals are missing. Their catalog records are available; use Find Missing Photos to relink them.": "有 {missing} 個原始檔案遺失。其目錄記錄可用；請使用「尋找遺失相片」重新連結檔案。"
 }

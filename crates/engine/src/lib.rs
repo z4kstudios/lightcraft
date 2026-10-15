@@ -506,15 +506,21 @@ impl Session {
     }
 
     fn apply_catalog(&mut self, op: Op) -> Result<Op> {
-        let inv = self.catalog.apply(op.clone())?;
+        // Retain only cache IDs while the catalog consumes the operation. Cloning an import
+        // batch here also cloned every photo, although commit already keeps the journal copy.
+        let mut invalidated = Vec::new();
         let mut pending = vec![&op];
         while let Some(op) = pending.pop() {
             match op {
-                Op::SetFile { id, .. } | Op::Relink { id, .. } | Op::SetContent { id, .. } | Op::RemovePhoto { id } => self.media.forget(*id),
-                Op::AddPhoto { photo } => self.media.forget(photo.id),
+                Op::SetFile { id, .. } | Op::Relink { id, .. } | Op::SetContent { id, .. } | Op::RemovePhoto { id } => invalidated.push(*id),
+                Op::AddPhoto { photo } => invalidated.push(photo.id),
                 Op::Batch { ops } => pending.extend(ops),
                 _ => {}
             }
+        }
+        let inv = self.catalog.apply(op)?;
+        for id in invalidated {
+            self.media.forget(id);
         }
         Ok(inv)
     }

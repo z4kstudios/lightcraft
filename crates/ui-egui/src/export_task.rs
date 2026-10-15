@@ -263,25 +263,39 @@ mod contact_sheet_tests {
             })),
             ..Default::default()
         };
-        let mut app = LightcraftApp::new(lightcraft_engine::Session::with_demo(), services);
+        // Exercise the menu/picker/background PDF workflow with a small procedural original.
+        // A full-size demo makes this test's deadline depend on unrelated concurrent renders.
+        let demo = lightcraft_engine::Session::with_demo();
+        let id = demo.active().unwrap();
+        let mut photo = (**demo.catalog.photo(id).unwrap()).clone();
+        photo.width = 96;
+        photo.height = 64;
+        let mut session = lightcraft_engine::Session::new();
+        session.catalog.apply(lightcraft_catalog::Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        session.execute("library.select", &json!({"ids": [id.0], "active": id.0})).unwrap();
+        let mut app = LightcraftApp::new(session, services);
         app.run("dialog.contactSheet", json!({})).unwrap();
         let Some(Dialog::ContactSheet { options }) = app.ui.dialog.as_mut() else { panic!("no contact sheet settings") };
         options.paper = "letter".into();
         options.landscape = true;
-        let mut h = crate::headless::Headless::new(app, [1000.0, 800.0], 1.0);
-        let dialog = h.app.ui.dialog.take().unwrap();
-        crate::panels::dialogs::confirm_dialog(&mut h.app, &dialog).unwrap();
-        assert_eq!(h.app.pending_picks.len(), 1);
+        let dialog = app.ui.dialog.take().unwrap();
+        crate::panels::dialogs::confirm_dialog(&mut app, &dialog).unwrap();
+        assert_eq!(app.pending_picks.len(), 1);
+        let ctx = egui::Context::default();
+        crate::pick::poll(&mut app, &ctx);
+        assert!(app.pending_picks.is_empty());
+        assert!(app.export.is_some(), "picker did not start export: {:?}", app.ui.toast);
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            // The activity stack lays out text, which egui only allows inside a frame.
-            h.step();
-            if h.app.last_export_result.is_some() {
+            // Poll the real worker without starting unrelated gallery renders each frame.
+            poll(&mut app, &ctx);
+            if app.export.is_none() {
                 break;
             }
             assert!(Instant::now() < deadline, "export did not finish");
             std::thread::sleep(Duration::from_millis(10));
         }
+        let result = app.last_export_result.as_ref().unwrap_or_else(|| panic!("export failed: {:?}", app.ui.toast));
         let req = asked.lock().unwrap();
         assert_eq!(req[0].kind, PickKind::Save);
         assert_eq!(req[0].filter.as_ref().unwrap().1, &["pdf"]);
@@ -289,7 +303,7 @@ mod contact_sheet_tests {
         let b = bytes.lock().unwrap();
         assert!(b.starts_with(b"%PDF-1.4"));
         assert!(String::from_utf8_lossy(&b).contains("/MediaBox [0 0 792.00 612.00]"));
-        assert_eq!(h.app.last_export_result.as_ref().unwrap()["files"][0]["photos"], 1);
+        assert_eq!(result["files"][0]["photos"], 1);
     }
 
     #[test]

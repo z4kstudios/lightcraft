@@ -6,6 +6,39 @@ fn demo() -> Session {
     Session::with_demo()
 }
 
+#[test]
+fn nested_catalog_operations_invalidate_sources_after_success_and_on_undo_redo() {
+    use crate::media::SourceLevel;
+    use lightcraft_catalog::{Op, PhotoId};
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let image = std::sync::Arc::new(lightcraft_raster::Rgb32f::new(1, 1));
+    let cache = |s: &mut Session| {
+        for level in [SourceLevel::Thumb, SourceLevel::Preview, SourceLevel::Full] {
+            s.media.insert(id, level, image.clone());
+        }
+    };
+    cache(&mut s);
+    // An invalid operation must not throw away usable sources.
+    assert!(s.apply_catalog(Op::Batch { ops: vec![Op::RemovePhoto { id }, Op::RemovePhoto { id: PhotoId(u64::MAX) }] }).is_err());
+    assert!(s.catalog.photo(id).is_some(), "the failed batch restores the removed photo");
+    for level in [SourceLevel::Thumb, SourceLevel::Preview, SourceLevel::Full] {
+        assert!(s.media.has_source(id, level), "the failed batch keeps usable sources");
+    }
+    s.commit("Remove", Op::Batch { ops: vec![Op::Batch { ops: vec![Op::RemovePhoto { id }] }] }).unwrap();
+    for level in [SourceLevel::Thumb, SourceLevel::Preview, SourceLevel::Full] {
+        assert!(!s.media.has_source(id, level));
+    }
+    cache(&mut s);
+    s.undo_step().unwrap();
+    assert!(s.catalog.photo(id).is_some());
+    assert!(!s.media.has_source(id, SourceLevel::Full), "undo AddPhoto must invalidate the source too");
+    cache(&mut s);
+    s.redo_step().unwrap();
+    assert!(s.catalog.photo(id).is_none());
+    assert!(!s.media.has_source(id, SourceLevel::Full));
+}
+
 fn active_dev(s: &Session) -> lightcraft_develop::DevelopSettings {
     (*s.develop_of(s.active().unwrap()).unwrap()).clone()
 }

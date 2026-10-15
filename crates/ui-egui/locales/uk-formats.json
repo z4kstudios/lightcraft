@@ -247,5 +247,8 @@
   "{n} photos opened for editing; each is stacked with its original": "Відкрито для редагування фото: {n}; кожне об’єднано в стос з оригіналом",
   "{name} opened in the other editor": "{name} відкрито в іншому редакторі",
   "{n} originals opened in the other editor": "Відкрито оригіналів в іншому редакторі: {n}",
-  "· {in_source} identical copies": "· ідентичних копій: {in_source}"
+  "· {in_source} identical copies": "· ідентичних копій: {in_source}",
+  "{count} more warnings.": "Інших попереджень: {count}.",
+  "{photos} catalog records processed; {collections} collections.": "Оброблено записів каталогу: {photos}; колекцій: {collections}.",
+  "{missing} originals are missing. Their catalog records are available; use Find Missing Photos to relink them.": "Не знайдено оригінали: {missing}. Їхні записи каталогу доступні; скористайтеся пошуком відсутніх фотографій, щоб відновити посилання."
 }

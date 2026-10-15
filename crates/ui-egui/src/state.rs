@@ -785,6 +785,13 @@ pub struct NameEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Dialog {
+    /// A Lightroom import result stays readable after its activity row disappears.
+    LightroomResult {
+        summary: String,
+        library: Option<String>,
+        details: Vec<String>,
+        first: Option<u64>,
+    },
     ContactSheet {
         options: lightcraft_engine::contact_sheet::Options,
     },

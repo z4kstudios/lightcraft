@@ -2151,5 +2151,10 @@
   "Adding to Apple Photos": "Додавання до Apple Фото",
   "No graphics processor found: LightCraft renders on the CPU, which is much slower. Details in Help → System Info.": "Графічний процесор не знайдено: LightCraft виконує рендеринг на ЦП, а це набагато повільніше. Докладніше: Довідка → Інформація про систему.",
   "On NixOS, start it from `nix develop`.": "У NixOS запускайте його з `nix develop`.",
-  "Files with the same content as another file in this import: only the first is imported.": "Файли з тим самим вмістом, що й інший файл цього імпорту: імпортується лише перший."
+  "Files with the same content as another file in this import: only the first is imported.": "Файли з тим самим вмістом, що й інший файл цього імпорту: імпортується лише перший.",
+  "Lightroom Catalog Import": "Імпорт каталогу Lightroom",
+  "Destination library": "Бібліотека призначення",
+  "Show in Library": "Показати в бібліотеці",
+  "Lightroom catalogs import into the open library; no separate catalog folder is created.": "Каталоги Lightroom імпортуються у відкриту бібліотеку; окрема папка каталогу не створюється.",
+  "These photos are only in memory. Open a library on disk and import the catalog again to save them.": "Ці фотографії є лише в пам’яті. Відкрийте бібліотеку на диску та імпортуйте каталог повторно, щоб зберегти їх."
 }

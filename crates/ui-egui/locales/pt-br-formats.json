@@ -247,5 +247,8 @@
   "{n} photos opened for editing; each is stacked with its original": "{n} fotos abertas para edição; cada uma está empilhada com a original",
   "{name} opened in the other editor": "{name} aberto no outro editor",
   "{n} originals opened in the other editor": "{n} originais abertos no outro editor",
-  "· {in_source} identical copies": "· {in_source} cópias idênticas"
+  "· {in_source} identical copies": "· {in_source} cópias idênticas",
+  "{count} more warnings.": "Mais {count} avisos.",
+  "{photos} catalog records processed; {collections} collections.": "{photos} registros do catálogo processados; {collections} coleções.",
+  "{missing} originals are missing. Their catalog records are available; use Find Missing Photos to relink them.": "{missing} originais estão ausentes. Seus registros no catálogo estão disponíveis; use Encontrar fotos ausentes para vinculá-los novamente."
 }

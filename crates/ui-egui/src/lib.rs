@@ -383,6 +383,8 @@ pub struct LightcraftApp {
     pub lightroom: Option<lightroom_import::LightroomTask>,
     /// Last terminal Lightroom result, exposed by the command's status/wait response.
     pub lightroom_last: Option<Value>,
+    /// A completed import result waiting for another modal dialog to close.
+    pub(crate) lightroom_result: Option<state::Dialog>,
     /// The library generation the window title and the recent list were last updated for.
     pub shown_library: Option<u64>,
     /// A background export in progress.
@@ -476,6 +478,7 @@ impl LightcraftApp {
             sync_run: None,
             lightroom: None,
             lightroom_last: None,
+            lightroom_result: None,
             shown_library: None,
             export: None,
             tasks: Default::default(),
