@@ -291,5 +291,9 @@
   "Renames {n} face{} across the library. The files are not changed.": "Renomme {n} visage{} dans la bibliothèque. Les fichiers ne sont pas modifiés.",
   "“{to}” is already a person. Combining them makes one person; Undo separates them again.": "« {to} » est déjà une personne. Les combiner n’en fait qu’une ; Annuler les sépare de nouveau.",
   "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has": "Fusion de {what} ajoutée en {mp} : la taille complète, {full}, demande plus de mémoire que n’en a cet ordinateur",
-  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "Fusion de {what} ajoutée en {mp}, la plus grande taille possible pour un panorama (taille complète : {full})"
+  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "Fusion de {what} ajoutée en {mp}, la plus grande taille possible pour un panorama (taille complète : {full})",
+  "Already in “{}”": "Déjà dans « {} »",
+  "Move {n} photo{} to “{}”": "Déplacer {n} photo{} vers « {} »",
+  "Move {n} photo{} to “{}”?": "Déplacer {n} photo{} vers « {} » ?",
+  "Moved {n} photo{} to “{}”. Edit → Undo moves them back.": "{n} photo{} déplacée(s) vers « {} ». Modifier → Annuler les remet en place."
 }

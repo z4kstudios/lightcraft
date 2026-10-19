@@ -27,6 +27,7 @@ pub const LANGUAGE_COMMANDS: &[UiCommand] = &[
     ("app.language.polish", crate::i18n::Locale::Pl.name(), None, "Edit>Language"),
     ("app.language.czech", crate::i18n::Locale::Cs.name(), None, "Edit>Language"),
     ("app.language.italian", crate::i18n::Locale::It.name(), None, "Edit>Language"),
+    ("app.language.georgian", crate::i18n::Locale::Ka.name(), None, "Edit>Language"),
 ];
 
 /// Every UI command: the languages, then everything else. `xtask parity` reads both tables from
@@ -52,6 +53,7 @@ pub fn language_from_command(id: &str) -> Option<crate::i18n::Locale> {
         "app.language.polish" => Some(crate::i18n::Locale::Pl),
         "app.language.czech" => Some(crate::i18n::Locale::Cs),
         "app.language.italian" => Some(crate::i18n::Locale::It),
+        "app.language.georgian" => Some(crate::i18n::Locale::Ka),
         _ => None,
     }
 }
@@ -72,6 +74,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("view.people", "People", None, "View"),
     ("view.person", "Show Person", None, ""),
     ("view.faceBoxes", "Face Boxes", None, "View"),
+    ("view.focusPoint", "Show Focus Point", Some("Alt+F"), "View"),
+    ("view.zoomToFocus", "Zoom to Focus Point", None, "View"),
     ("view.reference", "Reference View", Some("Shift+R"), "View"),
     ("photo.setReference", "Set as Reference Photo", None, ""),
     ("compare.swap", "Swap Compare Photos", None, "View"),
@@ -539,6 +543,16 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(Value::Null)
         }
         "view.compare" => crate::panels::compare::enter_compare(app),
+        "view.focusPoint" => {
+            // {on?}; no params toggles. The camera's focus point (Sony, from the file) over the photo.
+            app.ui.settings.focus_point = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.settings.focus_point);
+            Ok(json!({"on": app.ui.settings.focus_point}))
+        }
+        "view.zoomToFocus" => {
+            // {on?}; no params toggles. Toggle Zoom (Z) centres on the focus point when there is one.
+            app.ui.settings.zoom_to_focus = p.get("on").and_then(Value::as_bool).unwrap_or(!app.ui.settings.zoom_to_focus);
+            Ok(json!({"on": app.ui.settings.zoom_to_focus}))
+        }
         "view.faceBoxes" => {
             app.ui.face_boxes = p.get("show").and_then(Value::as_bool).unwrap_or(!app.ui.face_boxes);
             Ok(json!({"show": app.ui.face_boxes}))
@@ -691,7 +705,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 crate::state::InfoOverlay::Basic => "Info Overlay: File",
                 crate::state::InfoOverlay::Exposure => "Info Overlay: Exposure",
             };
-            app.toast(&ctx, label);
+            app.toast(&ctx, crate::i18n::tr(label));
             Ok(json!({"infoOverlay": app.ui.info_overlay}))
         }
         "view.chooseLayoutImage" => {
@@ -804,9 +818,18 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(Value::Null)
         }
         "view.zoomToggle" => {
-            // the same ratio a click on the photo zooms to
-            app.ui.zoom = if app.ui.zoom == Zoom::Fit { Zoom::Percent(app.ui.click_zoom as f32) } else { Zoom::Fit };
+            // the same ratio a click on the photo zooms to; zooming in centres on the camera's focus
+            // point when the photo has one (View ▸ Zoom to Focus Point)
+            let zoom_in = app.ui.zoom == Zoom::Fit;
+            app.ui.zoom = if zoom_in { Zoom::Percent(app.ui.click_zoom as f32) } else { Zoom::Fit };
             app.ui.zoom_anim = true;
+            if zoom_in
+                && app.ui.settings.zoom_to_focus
+                && let Some(pan) = app.session.active().and_then(|id| crate::panels::detail::focus_pan(app, id))
+            {
+                app.ui.pan = pan;
+                return Some(Ok(json!({"focus": [pan.0, pan.1]})));
+            }
             Ok(Value::Null)
         }
         "view.clickZoom" => {
@@ -2121,12 +2144,13 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "app.exportPrevious" => app.session.active().is_some() && app.session.last_export.is_some(),
         "dialog.pasteSettings" => app.session.active().is_some() && app.session.clipboard.is_some(),
         "photo.openOriginalInExternal" => {
+            // only a file type LightCraft reads can be handed over (#2135); the extension alone
+            // decides, so no disk or share is touched while a menu is drawn
             app.services.open_with.is_some()
-                && app
-                    .session
-                    .active()
-                    .and_then(|id| app.session.catalog.photo(id))
-                    .is_some_and(|p| matches!(p.source, lightcraft_engine::catalog::Source::File { .. }))
+                && app.session.active().and_then(|id| app.session.catalog.photo(id)).is_some_and(|p| match &p.source {
+                    lightcraft_engine::catalog::Source::File { path } => lightcraft_engine::open_path::is_media(std::path::Path::new(path)),
+                    _ => false,
+                })
         }
         "app.showInFinder" => {
             app.services.reveal.is_some()
@@ -2301,8 +2325,15 @@ fn edit_in(app: &mut LightcraftApp, ctx: &egui::Context, p: &Value, photocraft: 
         if let Some(id) = id {
             app.ui.external_edits.push(*id);
         }
-        if let Some(Err(e)) = app.services.open_with.as_mut().map(|f| f(path, &editor)) {
-            failed = Some(e);
+        // the copy is LightCraft's own render, but it goes through the same gate as any other
+        // path handed to the system opener (#2135)
+        match lightcraft_engine::open_path::openable(path, "") {
+            Err(e) => failed = Some(e),
+            Ok(absolute) => {
+                if let Some(Err(e)) = app.services.open_with.as_mut().map(|f| f(&absolute, &editor)) {
+                    failed = Some(e);
+                }
+            }
         }
     }
     match (failed, copies.as_slice()) {
@@ -2354,11 +2385,13 @@ fn open_originals(app: &mut LightcraftApp, p: &Value) -> Result<Value, String> {
     let mut files = Vec::new();
     let mut skipped = Vec::new();
     for id in ids {
-        match app.session.catalog.photo(id).map(|ph| &ph.source) {
-            Some(lightcraft_engine::catalog::Source::File { path }) if std::path::Path::new(path).is_file() => files.push((id, path.clone())),
-            Some(lightcraft_engine::catalog::Source::File { path }) => {
-                skipped.push(json!({"id": id.0, "reason": format!("the original is missing: {path}")}))
-            }
+        // the path may come from an imported catalog: only a photo file LightCraft reads is
+        // handed to the opener, never a program (#2135)
+        match app.session.catalog.photo(id).map(|ph| (ph.file_name.clone(), ph.source.clone())) {
+            Some((name, lightcraft_engine::catalog::Source::File { path })) => match lightcraft_engine::open_path::openable(&path, &name) {
+                Ok(absolute) => files.push((id, absolute)),
+                Err(reason) => skipped.push(json!({"id": id.0, "reason": reason})),
+            },
             Some(_) => skipped.push(json!({"id": id.0, "reason": "a demo photo has no original file"})),
             None => skipped.push(json!({"id": id.0, "reason": "no such photo"})),
         }

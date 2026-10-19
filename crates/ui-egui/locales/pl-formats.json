@@ -291,5 +291,9 @@
   "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has": "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has",
   "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})",
   "Color space: Rec. 2020 {curve} (HDR AVIF)": "Color space: Rec. 2020 {curve} (HDR AVIF)",
-  "{n} selected photos · {pages} pages": "{n} selected photos · {pages} pages"
+  "{n} selected photos · {pages} pages": "{n} selected photos · {pages} pages",
+  "Already in “{}”": "Już w „{}”",
+  "Move {n} photo{} to “{}”": "Przenieś do „{1}” — zdjęcia: {n}{0:.0}",
+  "Move {n} photo{} to “{}”?": "Przenieść do „{1}” — zdjęcia: {n}{0:.0}?",
+  "Moved {n} photo{} to “{}”. Edit → Undo moves them back.": "Przeniesiono do „{1}” — zdjęcia: {n}{0:.0}. Edytuj → Cofnij przywróci je."
 }

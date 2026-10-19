@@ -433,12 +433,31 @@ impl MoveFs for RealFs {
     }
 
     fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
-        use std::io::Write;
-        let bytes = std::fs::read(a)?;
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(b)?;
-        f.write_all(&bytes).and_then(|_| f.sync_all()).inspect_err(|_| {
-            let _ = std::fs::remove_file(b);
-        })
+        if self.exists(b) {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} already exists", b.display())));
+        }
+        // Streamed (a large raw or video is never read into memory whole), into a hidden name
+        // beside `b` that only takes `b`'s name once complete: a share that drops mid-copy, so
+        // the partial file can't be removed either, leaves no truncated file under the photo's
+        // name for a retry to take for the photo.
+        let name = b.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        // a free name: one left by a copy the share cut off (it couldn't be removed then) doesn't
+        // block the next
+        let partial = (0..1000u32)
+            .map(|k| b.with_file_name(format!(".{name}.lc-partial-{}-{k}", std::process::id())))
+            .find(|p| !self.exists(p))
+            .ok_or_else(|| std::io::Error::other(format!("no free temporary name beside {}", b.display())))?;
+        let copied = (|| {
+            let mut from = std::fs::File::open(a)?;
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&partial)?;
+            std::io::copy(&mut from, &mut f)?;
+            f.sync_all()
+        })();
+        let placed = copied.and_then(|()| self.rename_no_replace(&partial, b));
+        if placed.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        placed
     }
 
     fn remove_file(&self, p: &Path) -> std::io::Result<()> {
@@ -897,7 +916,8 @@ fn plan_rename_core(
 ) -> Vec<RenamePlan> {
     let mut taken: HashSet<String> = HashSet::new(); // lower-case target paths/names claimed in this batch
     let mut out = Vec::new();
-    for (seq, p) in (start..).zip(photos) {
+    for (i, p) in photos.iter().enumerate() {
+        let seq = start.saturating_add(i);
         let want = expand(template, p, seq);
         let (stem, ext) = split_ext(&want);
         let (stem, ext) = (stem.to_string(), ext.to_string());

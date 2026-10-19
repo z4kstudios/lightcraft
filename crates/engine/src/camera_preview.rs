@@ -31,7 +31,10 @@ use lightcraft_raw::{
 /// 4: a tone curve from black-and-white camera JPEGs (#577).
 /// 5: dark JPEG luminance pairs for the camera toe (#1307).
 /// 6: the ILCA-99M2 profile.
-pub const LOOK_VERSION: u32 = 6;
+/// 7: the sensor proxy follows the file's lens warp when the camera JPEG is lens-corrected.
+/// 8: the bundled NIKON Z 6_2 profile.
+/// 9: the bundled NIKON Z 8 and NIKON D5300 profiles.
+pub const LOOK_VERSION: u32 = 9;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CameraLook {
@@ -76,14 +79,18 @@ pub(crate) fn file_local_look(format: RawFormat) -> bool {
 /// white (a monochrome picture style) has no colour to fit, but still gives its tone curve: with the camera profile's
 /// colour in [`fit_preview`], else on top of the spectral matrices or the fallback ([`monochrome_look`]). Returns the
 /// as-shot white, the camera transform at it and the fitted look.
+/// `lens` is the file's own lens-correction warp ([`lens_geometry`], read before the caller removes it from
+/// `OpcodeList3`): the camera applied it to its JPEG, so the sensor proxy is warped the same way before pairing.
+/// `embedded` is the file's embedded lens vignetting, for the DNG tone fit.
 pub(crate) fn starting_colour(
     raw: &mut RawImage,
     bytes: &[u8],
-    lens: Option<&lightcraft_develop::EmbeddedLens>,
+    lens: Option<&LensGeometry>,
+    embedded: Option<&lightcraft_develop::EmbeddedLens>,
 ) -> (Xy, CameraTransform, Option<CameraLook>) {
-    let (xy, t, look) = starting_colour_with(raw, |raw, t| fit_preview(raw, bytes, t), |raw, t| monochrome_look(raw, bytes, t));
+    let (xy, t, look) = starting_colour_with(raw, |raw, t| fit_preview(raw, bytes, t, lens), |raw, t| monochrome_look(raw, bytes, t, lens));
     if look.is_none() && dng_tone_eligible(raw, &t) {
-        let look = fit_dng_tone(raw, bytes, &t, lens);
+        let look = fit_dng_tone(raw, bytes, &t, embedded);
         return (xy, t, look);
     }
     (xy, t, look)
@@ -154,7 +161,8 @@ pub(crate) fn starting_colour_tags(raw: &mut RawImage, bytes: &[u8]) -> Option<C
     // the white the source shows, decided before `starting_colour` may fill in measured matrices
     let scale = crate::files::WbScaleOf::new(raw.format, &raw.color, raw.wb_multipliers, &raw.metadata);
     let white = scale.dng_white(&raw.color, lightcraft_raw::color::as_shot_white_xy(raw));
-    let (_, t, look) = starting_colour(raw, bytes, None);
+    // (a merge frame arrives without its lens warp: `lightcraft_merge` removes it before calling)
+    let (_, t, look) = starting_colour(raw, bytes, None, None);
     dng_colour(&raw.color, &white, &t, look.as_ref())
 }
 
@@ -252,11 +260,11 @@ fn dng_tone_curve(tone: &CameraTone) -> Option<ToneCurve> {
 }
 
 /// The look fitted to the file's camera JPEG, and whether that JPEG is black and white ([`monochrome`]).
-pub(crate) fn fit_preview(raw: &RawImage, bytes: &[u8], transform: &CameraTransform) -> (Option<CameraLook>, bool) {
+pub(crate) fn fit_preview(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, lens: Option<&LensGeometry>) -> (Option<CameraLook>, bool) {
     if !transform.matrix_is_fallback || !file_local_look(raw.format) {
         return (None, false);
     }
-    let Some((sensor, reference, clipped)) = proxies(raw, bytes, transform, PROXY, 0.0) else { return (None, false) };
+    let Some((sensor, reference, clipped)) = proxies(raw, bytes, transform, PROXY, 0.0, lens) else { return (None, false) };
     let black_and_white = monochrome(&reference);
     // A camera profile pooled from many photos knows colours this photo shows too little of;
     // try its colour first and fit tone/chroma per photo (picture styles vary).
@@ -427,7 +435,7 @@ fn fit_dng_tone(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, lens:
         }
         None
     };
-    let Some((mut sensor, reference, clipped)) = proxies(raw, bytes, transform, PROXY, MIN_PREVIEW_FRACTION) else { return refuse("preview") };
+    let Some((mut sensor, reference, clipped)) = proxies(raw, bytes, transform, PROXY, MIN_PREVIEW_FRACTION, None) else { return refuse("preview") };
     // As the loader renders it: the profile's tables around the baseline exposure.
     let xy = lightcraft_raw::color::as_shot_white_xy(raw);
     if let Some(tables) = lightcraft_raw::profile::ProfileTables::new(&raw.color.profile, lightcraft_raw::color::illuminant_weight(&raw.color, xy)) {
@@ -569,7 +577,14 @@ fn structure_agrees(sensor: &Rgb32f, reference: &Rgb32f) -> bool {
 /// Same-size proxies of the sensor (white-balanced, baseline exposure, through `transform`'s
 /// matrix: the generic camera ≈ sRGB model) and of the file's embedded camera JPEG (linear Rec.2020),
 /// and per proxy pixel whether any sensor sample it covers is clipped.
-fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usize, min_fraction: f64) -> Option<(Rgb32f, Rgb32f, Vec<bool>)> {
+fn proxies(
+    raw: &RawImage,
+    bytes: &[u8],
+    transform: &CameraTransform,
+    size: usize,
+    min_fraction: f64,
+    lens: Option<&LensGeometry>,
+) -> Option<(Rgb32f, Rgb32f, Vec<bool>)> {
     let edge = (2 * size).max(384) as u32;
     let decoded = crate::files::decode_raw_preview(
         bytes,
@@ -604,6 +619,12 @@ fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usiz
     let k = (crop.width.max(crop.height).div_ceil(edge as usize).max(2)).div_ceil(2) * 2;
     let mut sensor = sensor_proxy(raw, k, edge as usize)?;
     let mut clipped = clip_mask(&sensor);
+    // The camera may have corrected its JPEG with the lens warp the file carries (Nikon Z lenses always, at up to 9 %
+    // zoom; other cameras when their correction setting is on): the sensor moved into that geometry is a candidate,
+    // kept below when it lines up with the JPEG better than the uncorrected one.
+    let warped = lens
+        .filter(|_| raw.format != RawFormat::Cr3)
+        .and_then(|l| Some((into_lens_geometry(&sensor, raw, k, l)?, into_lens_geometry(&clipped, raw, k, l)?)));
     let gain = 2f32.powf(transform.baseline_exposure as f32);
     let to_working = |p: [f32; 3]| transform.matrix.apply_f32(std::array::from_fn(|i| p[i] * transform.wb[i] * gain));
     if raw.format == RawFormat::Cr3 {
@@ -617,7 +638,15 @@ fn proxies(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, size: usiz
         (sensor, clipped) = align_cr3_framing(sensor, clipped, &reference);
     }
     let mut sensor = fit(&sensor, size, size, Filter::Box);
-    let reference = reference_at(&reference, &sensor);
+    let mut reference_small = reference_at(&reference, &sensor);
+    if let Some((warped, warped_clipped)) = warped {
+        let candidate = fit(&warped, size, size, Filter::Box);
+        let candidate_reference = reference_at(&reference, &candidate);
+        if alignment(&candidate, &candidate_reference) > alignment(&sensor, &reference_small) {
+            (sensor, reference_small, clipped) = (candidate, candidate_reference, warped_clipped);
+        }
+    }
+    let reference = reference_small;
     // A proxy pixel is clipped when any sample it averages is (outside the CR3 framing the mask is
     // NaN: those pixels are left out of the pairs anyway). Resized to exactly the proxy's size, like
     // the reference, so the mask pairs pixel for pixel.
@@ -779,12 +808,12 @@ fn align_cr3_framing(sensor: Rgb32f, clipped: Rgb32f, reference: &Rgb32f) -> (Rg
 /// Colour training pairs of one raw for a camera profile: white-balanced camera RGB (with the
 /// baseline exposure) → its camera JPEG (linear Rec.2020). `None` for formats with their own
 /// colour matrices, other files or unusable previews.
-pub(crate) fn profile_pairs(raw: &RawImage, bytes: &[u8]) -> Option<Vec<([f64; 3], [f64; 3])>> {
+pub(crate) fn profile_pairs(raw: &RawImage, bytes: &[u8], lens: Option<&LensGeometry>) -> Option<Vec<([f64; 3], [f64; 3])>> {
     if !file_local_look(raw.format) || lightcraft_raw::color::has_matrix(&raw.color) {
         return None;
     }
     let transform = lightcraft_raw::color::camera_transform(raw, lightcraft_raw::color::as_shot_white_xy(raw));
-    let (sensor, reference, clipped) = proxies(raw, bytes, &transform, PROFILE_PROXY, 0.0)?;
+    let (sensor, reference, clipped) = proxies(raw, bytes, &transform, PROFILE_PROXY, 0.0, lens)?;
     let to_camera = transform.matrix.inverse()?;
     // clipped sensor pixels don't record the scene's colour (see `fit_look`)
     let sensor = without_clipped(&sensor, &clipped).unwrap_or(sensor);
@@ -797,6 +826,102 @@ pub(crate) fn profile_pairs(raw: &RawImage, bytes: &[u8]) -> Option<Vec<([f64; 3
 pub(crate) fn fit_profile(pairs: &[([f64; 3], [f64; 3])]) -> Option<(Mat3, Option<HsvTable>)> {
     let matrix = fit_matrix(pairs)?;
     Some((matrix, fit_hue_sat(pairs, &matrix)))
+}
+
+/// A raw's lens-correction warp, as its camera applied it to the embedded JPEG: the first `WarpRectilinear` of
+/// `OpcodeList3` (its green plane; the in-file corrections LightCraft reads have no tangential terms). `None` without
+/// one, or for a DNG 1.6 `WarpRectilinear2` chain (phone DNGs, which carry colour matrices and are not fitted).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LensGeometry {
+    /// `kr0..kr3`: source radius = r * (kr0 + kr1 r^2 + kr2 r^4 + kr3 r^6), r over the farthest corner distance.
+    k: [f64; 4],
+    /// The optical centre, relative to the active area (as the opcode has it).
+    center: [f64; 2],
+}
+
+pub(crate) fn lens_geometry(list3: &[lightcraft_raw::Opcode]) -> Option<LensGeometry> {
+    use lightcraft_raw::Opcode;
+    let ops: Vec<&Opcode> = lightcraft_raw::opcodes::applied_ops(list3).collect();
+    if ops.iter().any(|op| matches!(op, Opcode::WarpRectilinear2 { .. })) {
+        return None;
+    }
+    ops.into_iter().find_map(|op| match op {
+        Opcode::WarpRectilinear { planes, center } => {
+            let p = planes.get(1).or(planes.first())?;
+            let k = [p[0], p[1], p[2], p[3]];
+            (k.iter().chain(center).all(|v| v.is_finite()) && (0.0..=1.0).contains(&center[0]) && (0.0..=1.0).contains(&center[1]))
+                .then_some(LensGeometry { k, center: *center })
+        }
+        _ => None,
+    })
+}
+
+/// How well two same-size proxies line up: the correlation of their high-passed log luminance over the pixels both
+/// have (a tone curve or colour change leaves it alone, a geometric offset lowers it). `-1` without enough pixels.
+fn alignment(a: &Rgb32f, b: &Rgb32f) -> f64 {
+    let (w, h) = (a.width, a.height);
+    if (b.width, b.height) != (w, h) || w < 3 || h < 3 {
+        return -1.0;
+    }
+    let lum = |img: &Rgb32f| img.data.iter().map(|p| (luminance_2020(*p).max(1e-4) as f64).ln()).collect::<Vec<f64>>();
+    let high = |l: &[f64]| -> Vec<f64> {
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
+                    return f64::NAN;
+                }
+                let around = [i - w - 1, i - w, i - w + 1, i - 1, i + 1, i + w - 1, i + w, i + w + 1];
+                l[i] - around.iter().map(|&j| l[j]).sum::<f64>() / 8.0
+            })
+            .collect()
+    };
+    let (ha, hb) = (high(&lum(a)), high(&lum(b)));
+    let pairs: Vec<(f64, f64)> = ha.into_iter().zip(hb).filter(|(x, y)| x.is_finite() && y.is_finite()).collect();
+    if pairs.len() < 64 {
+        return -1.0;
+    }
+    let n = pairs.len() as f64;
+    let (ma, mb) = (pairs.iter().map(|p| p.0).sum::<f64>() / n, pairs.iter().map(|p| p.1).sum::<f64>() / n);
+    let cov: f64 = pairs.iter().map(|p| (p.0 - ma) * (p.1 - mb)).sum();
+    let (va, vb): (f64, f64) = (pairs.iter().map(|p| (p.0 - ma).powi(2)).sum(), pairs.iter().map(|p| (p.1 - mb).powi(2)).sum());
+    let r = cov / (va * vb).sqrt().max(1e-12);
+    if r.is_finite() { r } else { -1.0 }
+}
+
+/// A `k`-binned sensor proxy of `raw` ([`sensor_proxy`]: the default crop, or the active area when the crop is
+/// smaller than a block, at `1/k`) moved into the camera JPEG's geometry: each pixel samples the proxy where `lens`
+/// maps it, and is NaN where that falls outside the proxy (the pairs leave it out). `None` for a proxy of another
+/// size (the demosaiced fallback of linear raws).
+fn into_lens_geometry(img: &Rgb32f, raw: &RawImage, k: usize, lens: &LensGeometry) -> Option<Rgb32f> {
+    let a = raw.active_area;
+    let c = raw.crop.clipped(a.width, a.height);
+    let c = if c.width < k || c.height < k { lightcraft_raw::Rect::new(0, 0, a.width, a.height) } else { c };
+    let (w, h) = (img.width, img.height);
+    if k == 0 || w != c.width / k || h != c.height / k || w == 0 || h == 0 || a.width < 2 || a.height < 2 {
+        return None;
+    }
+    let (aw, ah) = (a.width as f64 - 1.0, a.height as f64 - 1.0);
+    let (cx, cy) = (lens.center[0] * aw, lens.center[1] * ah);
+    let m = [(0.0, 0.0), (aw, 0.0), (0.0, ah), (aw, ah)].iter().map(|&(x, y)| (x - cx).hypot(y - cy)).fold(0.0, f64::max).max(1e-9);
+    let [k0, k1, k2, k3] = lens.k;
+    let kf = k as f64;
+    let (x0, y0) = (c.x as f64, c.y as f64);
+    let mut out = Rgb32f::new(w, h);
+    for (i, px) in out.data.iter_mut().enumerate() {
+        // the proxy pixel's centre in active-area pixel-index coordinates, mapped to the sensor
+        let (ox, oy) = (x0 + ((i % w) as f64 + 0.5) * kf - 0.5, y0 + ((i / w) as f64 + 0.5) * kf - 0.5);
+        let (dx, dy) = ((ox - cx) / m, (oy - cy) / m);
+        let r2 = dx * dx + dy * dy;
+        let f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+        let (sx, sy) = ((cx + m * dx * f + 0.5 - x0) / kf, (cy + m * dy * f + 0.5 - y0) / kf);
+        *px = if sx >= 0.5 && sy >= 0.5 && sx <= w as f64 - 0.5 && sy <= h as f64 - 0.5 {
+            img.sample_bilinear(sx as f32, sy as f32)
+        } else {
+            [f32::NAN; 3]
+        };
+    }
+    Some(out)
 }
 
 fn sensor_proxy(raw: &RawImage, k: usize, edge: usize) -> Option<Rgb32f> {
@@ -1296,11 +1421,11 @@ fn monochrome(reference: &Rgb32f) -> bool {
 /// `transform` is the colour the photo gets otherwise (the spectral matrices or the fallback's); the look keeps it and
 /// adds the tone curve alone ([`fit_tone_only`]), as [`fit_look`] tries the photo's own colour after a profile's. The
 /// chroma curve stays neutral: the JPEG has no colourfulness to learn.
-fn monochrome_look(raw: &RawImage, bytes: &[u8], transform: &CameraTransform) -> Option<CameraLook> {
+fn monochrome_look(raw: &RawImage, bytes: &[u8], transform: &CameraTransform, lens: Option<&LensGeometry>) -> Option<CameraLook> {
     if !file_local_look(raw.format) {
         return None;
     }
-    let (sensor, reference, clipped) = proxies(raw, bytes, transform, PROXY, 0.0)?;
+    let (sensor, reference, clipped) = proxies(raw, bytes, transform, PROXY, 0.0, lens)?;
     if !monochrome(&reference) {
         return None;
     }
@@ -2334,6 +2459,93 @@ mod tests {
         }
     }
 
+    /// The lens warp the colour fit follows is the first `WarpRectilinear`'s green plane; no warp, a DNG 1.6 chain
+    /// (phone DNGs, which carry colour matrices), a centre outside the area or a non-finite term give none.
+    #[test]
+    fn lens_geometry_reads_the_first_rectilinear_warp() {
+        use lightcraft_raw::Opcode;
+        let warp = |k0: f64, c: [f64; 2]| Opcode::WarpRectilinear {
+            planes: vec![[9.0, 0.0, 0.0, 0.0, 0.0, 0.0], [k0, 0.1, -0.02, 0.003, 0.0, 0.0], [9.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            center: c,
+        };
+        assert_eq!(lens_geometry(&[warp(0.97, [0.5, 0.4])]), Some(LensGeometry { k: [0.97, 0.1, -0.02, 0.003], center: [0.5, 0.4] }));
+        let single = Opcode::WarpRectilinear { planes: vec![[1.02, 0.0, 0.0, 0.0, 0.0, 0.0]], center: [0.5, 0.5] };
+        assert_eq!(lens_geometry(std::slice::from_ref(&single)).map(|g| g.k[0]), Some(1.02));
+        assert!(lens_geometry(&[]).is_none());
+        assert!(lens_geometry(&[warp(1.0, [1.5, 0.5])]).is_none());
+        assert!(lens_geometry(&[warp(f64::NAN, [0.5, 0.5])]).is_none());
+        let mut p = [0.0; lightcraft_raw::opcodes::WR2_LEN];
+        p[0] = 1.0;
+        p[18] = 1e6;
+        let chain = Opcode::WarpRectilinear2 { planes: vec![p], center: [0.5, 0.5], reciprocal: false, optional: false };
+        assert!(lens_geometry(&[chain, single]).is_none());
+    }
+
+    /// A binned sensor proxy moved into the camera JPEG's geometry: the identity warp leaves it as it is, a warp
+    /// whose source radius is 0.8 of the output's samples nearer the centre, output pixels whose source falls outside
+    /// the proxy are NaN (left out of the pairs), and a proxy of another size is left alone.
+    #[test]
+    fn the_sensor_proxy_follows_the_cameras_lens_warp() {
+        let mut raw = raw_of(RawFormat::Nef, "NIKON CORPORATION", "NIKON Z 6_2", Default::default());
+        raw.active_area = lightcraft_raw::Rect::new(0, 0, 64, 48);
+        raw.crop = raw.active_area;
+        // a 1/4 proxy whose pixels hold their own coordinates
+        let mut img = Rgb32f::new(16, 12);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = [(i % 16) as f32, (i / 16) as f32, 1.0];
+        }
+        let geometry = |k0: f64| LensGeometry { k: [k0, 0.0, 0.0, 0.0], center: [0.5, 0.5] };
+        let same = into_lens_geometry(&img, &raw, 4, &geometry(1.0)).unwrap();
+        assert!(same.data.iter().zip(&img.data).all(|(a, b)| (0..3).all(|c| (a[c] - b[c]).abs() < 1e-4)));
+        // the corner pixel's centre (1.5, 1.5) maps to (31.5 - 0.8 * 30, 23.5 - 0.8 * 22) = (7.5, 5.9) on the sensor
+        let zoomed = into_lens_geometry(&img, &raw, 4, &geometry(0.8)).unwrap();
+        assert!((zoomed.data[0][0] - 1.5).abs() < 1e-4 && (zoomed.data[0][1] - 1.1).abs() < 1e-4, "{:?}", zoomed.data[0]);
+        let outside = into_lens_geometry(&img, &raw, 4, &geometry(1.3)).unwrap();
+        assert!(outside.data[0][0].is_nan() && outside.data[6 * 16 + 8][0].is_finite());
+        assert!(into_lens_geometry(&Rgb32f::new(15, 12), &raw, 4, &geometry(1.0)).is_none());
+    }
+
+    /// A raw with an in-file lens correction (Fujifilm, Panasonic, the A7R IVA, Nikon) may have a lens-corrected
+    /// camera JPEG: the proxies the fit pairs line up with it at least as well as the uncorrected sensor, on every
+    /// corpus file the colour fit uses that carries such a warp, and better on those whose JPEG is corrected.
+    #[test]
+    fn corpus_lens_corrected_jpegs_pair_with_the_warped_sensor() {
+        let dir = std::env::var_os("LIGHTCRAFT_CORPUS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"))
+            .join("raw");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("skip: no corpus at {}", dir.display());
+            return;
+        };
+        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        let (mut checked, mut gain) = (0, 0.0);
+        for path in paths {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(mut raw) = lightcraft_raw::decode(&bytes) else { continue };
+            let Some(lens) = lens_geometry(&raw.opcodes.list3) else { continue };
+            if !file_local_look(raw.format) || lightcraft_raw::color::has_matrix(&raw.color) {
+                continue;
+            }
+            raw.opcodes.list3.retain(|op| !op.is_lens_correction());
+            let t = lightcraft_raw::color::camera_transform(&raw, lightcraft_raw::color::as_shot_white_xy(&raw));
+            let (Some((plain, reference, _)), Some((chosen, chosen_reference, _))) =
+                (proxies(&raw, &bytes, &t, PROXY, 0.0, None), proxies(&raw, &bytes, &t, PROXY, 0.0, Some(&lens)))
+            else {
+                continue;
+            };
+            let (before, after) = (alignment(&plain, &reference), alignment(&chosen, &chosen_reference));
+            eprintln!("{}: alignment {before:.3} -> {after:.3}", path.display());
+            // (chosen on camera RGB, measured after the colour transform: a near tie may flip by a little)
+            assert!(after >= before - 0.01, "{}: {before:.3} -> {after:.3}", path.display());
+            gain += after - before;
+            checked += 1;
+        }
+        eprintln!("{checked} corpus raws with an in-file lens warp, mean gain {:.3}", gain / checked.max(1) as f64);
+        assert!(checked == 0 || gain > 0.0);
+    }
+
     /// Step 1: a file's own colour matrices win over everything, including a spectral row for its model; no JPEG fit
     /// is tried.
     #[test]
@@ -2381,7 +2593,7 @@ mod tests {
         assert!(crate::camera_profiles::get("ILCE-7M4").is_some());
         let camera = lightcraft_raw::spectral::find(Some("SONY"), "ILCE-7M4").unwrap();
         let mut raw = raw_of(RawFormat::Arw, "SONY", "ILCE-7M4", Default::default());
-        let (_, t, look) = starting_colour(&mut raw, &[], None);
+        let (_, t, look) = starting_colour(&mut raw, &[], None, None);
         assert!(look.is_none());
         assert_eq!(raw.color.color_matrix, camera.color_matrix.map(Some));
         assert!(!t.matrix_is_fallback);
@@ -2440,13 +2652,13 @@ mod tests {
     #[test]
     fn a_camera_outside_the_table_keeps_the_fallback() {
         let mut raw = raw_of(RawFormat::Cr2, "Canon", "Canon EOS 7D", Default::default());
-        let (_, t, look) = starting_colour(&mut raw, &[], None);
+        let (_, t, look) = starting_colour(&mut raw, &[], None, None);
         assert!(look.is_none() && t.matrix_is_fallback);
         assert_eq!(raw.color, lightcraft_raw::ColorData::default());
         // without a model there is no table row
         let mut raw = raw_of(RawFormat::Cr2, "Canon", "", Default::default());
         raw.metadata.model = None;
-        assert!(starting_colour(&mut raw, &[], None).1.matrix_is_fallback);
+        assert!(starting_colour(&mut raw, &[], None, None).1.matrix_is_fallback);
     }
 
     /// The colour precedence on public raws (each skipped without its corpus file): a photo whose JPEG fit is
@@ -2465,13 +2677,14 @@ mod tests {
                 continue;
             };
             let mut raw = lightcraft_raw::decode(&bytes).unwrap();
+            let lens = lens_geometry(&raw.opcodes.list3);
             raw.opcodes.list3.retain(|op| !op.is_lens_correction());
             let own = lightcraft_raw::color::has_matrix(&raw.color);
             let (make, model) = (raw.metadata.make.as_deref(), raw.metadata.model.as_deref().unwrap_or_default());
             let measured = lightcraft_raw::spectral::find(make, model).is_some();
             let covered = measured || lightcraft_raw::kelvin_presets::covers(make, model);
             let before = raw.color.clone();
-            let (_, t, fitted) = starting_colour(&mut raw, &bytes, None);
+            let (_, t, fitted) = starting_colour(&mut raw, &bytes, lens.as_ref(), None);
             let spectral = !own && fitted.is_none() && measured;
             eprintln!("{name}: own matrices {own}, JPEG fit {}, spectral {spectral}", fitted.is_some());
             assert_eq!(raw.color != before, spectral, "{name}");
@@ -2579,7 +2792,7 @@ mod tests {
         assert_eq!(raw.format, RawFormat::Cr3);
         assert_eq!(raw.info().developed_size(), (6000, 4000));
         let transform = lightcraft_raw::color::camera_transform(&raw, lightcraft_raw::color::as_shot_white_xy(&raw));
-        let look = fit_preview(&raw, &bytes, &transform).0;
+        let look = fit_preview(&raw, &bytes, &transform, None).0;
         eprintln!("R100 guarded colour fit accepted: {}", look.is_some());
         assert!(look.is_some(), "this R100 corpus photo has enough matching colour after camera-framing alignment");
         let (_, info) = crate::files::load_bytes(&bytes, 400).unwrap();
@@ -2612,7 +2825,7 @@ mod tests {
         let raw = lightcraft_raw::decode(&bytes).unwrap();
         assert_eq!(raw.metadata.model.as_deref(), Some(model));
         let transform = lightcraft_raw::color::camera_transform(&raw, lightcraft_raw::color::as_shot_white_xy(&raw));
-        let look = fit_preview(&raw, &bytes, &transform).0.expect("fit accepted");
+        let look = fit_preview(&raw, &bytes, &transform, None).0.expect("fit accepted");
         let expected = bundled.matrix().mul(&transform.matrix.inverse().unwrap());
         for (row, want) in look.matrix.0.iter().zip(expected.0) {
             for (got, want) in row.iter().zip(want) {
@@ -2630,6 +2843,18 @@ mod tests {
     #[test]
     fn corpus_a99m2_uses_the_bundled_profile() {
         corpus_uses_the_bundled_profile("arw-sony-a99m2.arw", "ILCA-99M2");
+    }
+
+    /// The public Z 6II NEF wasn't one of the photos its bundled profile was fitted to.
+    #[test]
+    fn corpus_z6ii_uses_the_bundled_profile() {
+        corpus_uses_the_bundled_profile("nef-nikon-z6ii-lossless.nef", "NIKON Z 6_2");
+    }
+
+    /// The public Z 8 NEF (Z 14-24 f/2.8 S) wasn't one of the photos its bundled profile was fitted to.
+    #[test]
+    fn corpus_z8_uses_the_bundled_profile() {
+        corpus_uses_the_bundled_profile("nef-nikon-z8-lossless.nef", "NIKON Z 8");
     }
 
     /// A public D7500 NEF (skipped without the corpus): its look is fitted to its own JPEG and white
@@ -2981,9 +3206,9 @@ mod tests {
             let mut raw = lightcraft_raw::decode(&bytes).unwrap();
             raw.opcodes.list3.retain(|op| !op.is_lens_correction());
             let transform = lightcraft_raw::color::camera_transform(&raw, lightcraft_raw::color::as_shot_white_xy(&raw));
-            let look = fit_preview(&raw, &bytes, &transform).0.expect("a camera look");
+            let look = fit_preview(&raw, &bytes, &transform, None).0.expect("a camera look");
             // the look fitted to the JPEG, as before this change
-            let (sensor, reference, clipped) = proxies(&raw, &bytes, &transform, PROXY, 0.0).unwrap();
+            let (sensor, reference, clipped) = proxies(&raw, &bytes, &transform, PROXY, 0.0, None).unwrap();
             let profile = raw.metadata.model.as_deref().and_then(crate::camera_profiles::get);
             let colour = profile.as_ref().and_then(|p| Some((p.matrix().mul(&transform.matrix.inverse()?), p.hue_sat.clone())));
             let fitted = fit_look(&sensor, &reference, &clipped, colour).unwrap();
@@ -3573,12 +3798,12 @@ mod tests {
             tiff
         };
         let t = lightcraft_raw::color::camera_transform(&raw, lightcraft_raw::color::as_shot_white_xy(&raw));
-        let look = monochrome_look(&raw, &file([1.0; 3]), &t).expect("a tone curve from the black-and-white JPEG");
+        let look = monochrome_look(&raw, &file([1.0; 3]), &t, None).expect("a tone curve from the black-and-white JPEG");
         assert!(look.matrix == Mat3::IDENTITY && look.hue_sat.is_none(), "on the transform's colour");
         let curve = ToneMap::camera(&look.tone, 0.0, 0.0, 0.0);
         let mid = curve.apply(0.25);
         assert!((mid - (1.0 - (-0.75f32).exp())).abs() < 0.05, "the camera's curve at 0.25: {mid}");
-        assert!(monochrome_look(&raw, &file([1.0, 0.9, 0.8]), &t).is_none(), "a tinted JPEG is not black and white");
+        assert!(monochrome_look(&raw, &file([1.0, 0.9, 0.8]), &t, None).is_none(), "a tinted JPEG is not black and white");
     }
 
     /// The black-and-white fit has the partial look's checks: a JPEG of another picture, or one the default curve

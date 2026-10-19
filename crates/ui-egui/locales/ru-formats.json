@@ -291,5 +291,9 @@
   "Renames {n} face{} across the library. The files are not changed.": "Переименовывает {n} лиц в библиотеке. Файлы не изменяются.{:.0}",
   "“{to}” is already a person. Combining them makes one person; Undo separates them again.": "«{to}» уже есть среди людей. Объединение оставляет одного человека; отмена снова разделяет их.",
   "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has": "{what}: слияние добавлено в размере {mp}: для полного размера ({full}) не хватает памяти этого компьютера",
-  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "{what}: слияние добавлено в размере {mp} — это наибольший размер панорамы (полный размер: {full})"
+  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "{what}: слияние добавлено в размере {mp} — это наибольший размер панорамы (полный размер: {full})",
+  "Already in “{}”": "Уже в «{}»",
+  "Move {n} photo{} to “{}”": "Переместить в «{1}» фото: {n}{0:.0}",
+  "Move {n} photo{} to “{}”?": "Переместить в «{1}» фото: {n}{0:.0}?",
+  "Moved {n} photo{} to “{}”. Edit → Undo moves them back.": "В «{1}» перемещено фото: {n}{0:.0}. Правка → Отменить вернёт их."
 }

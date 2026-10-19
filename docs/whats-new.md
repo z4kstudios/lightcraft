@@ -2,6 +2,11 @@
 
 ## 2026-10-14
 
+### Model downloads time out on a name that doesn't resolve
+- Model downloads (AI denoise, faces, SAM) give up on a server name that doesn't resolve within the connect timeout,
+  and Cancel stops a download that is still looking the name up (issue #1532). The lookup used to block with no time
+  limit, and each of a server's addresses then got the whole connect timeout of its own.
+
 ### Lightroom radial masks on the right side
 - Radial masks brought over from Lightroom Classic (catalog import, XMP sidecars, edits inside DNGs and presets) now
   apply their effect inside the circle, as Lightroom does, instead of outside it (issue #1815). A mask inverted in
@@ -19,6 +24,16 @@
 - Showing a Local folder now makes its first photo the active one, as albums and the other sources do (issue
   #1447), or keeps the photo you had when the folder holds it. Before, the photo from the previous view stayed active:
   Photo Grid marked nothing, and Detail, the histogram and the photo info showed a photo that isn't in the folder.
+
+### Nikon Z 6II, Z 8 and D5300 colour profiles
+- Raws from the Nikon Z 6II, Z 8 and D5300 now start from a colour profile built from a few hundred photos from each camera, the same way the
+  Sony and Fujifilm profiles were made, instead of fitting each photo's colour on its own. Colours that one photo
+  shows only a little of come out closer to the camera's JPEG.
+
+### Closer camera colour for lens-corrected raws
+- Raws from cameras that correct their own JPEG for lens distortion (Panasonic and Fujifilm with that setting on, the
+  Sony A7R IVA) now start from colours closer to the camera's. The starting look was being fitted against a JPEG that
+  didn't line up with the raw near the edges. Photos you already imported pick this up when their previews are rebuilt.
 
 ### HDR merges of moving lights, and many brackets at once
 - A star, the moon or a light that moves between the photos of a bracket (a night bracket on a tripod) no longer
@@ -117,10 +132,6 @@
   #1236). The D7000, D5100, D800, D800E, Df, D4, D3, D3S, D700, D300, D300S, D600, D610, D810, D4S, D5600,
   Coolpix A, D3000, D40X, D60, D80, D2Xs, D200, D3200, D3100, D5000, D40, D50, D70, D70s and Nikon 1 V1 now show
   the area the camera itself frames, a few pixels smaller than before.
-- A command given photos it can't read as photo ids (`"id": "5"`, or a list with something else in it) from a
-  script, the control channel or MCP is now refused (issue #1506). It used to act on the selected photos instead,
-  or on the part of the list it could read, so a mistyped id could rate, move or delete the wrong photos.
-
 ### An empty library leads to Import
 - A library with no photos now opens on the Photo Grid with the sidebar (Square Grid stays as it is), instead of a
   Detail view that pointed at an empty grid. The grid and Detail view offer Import Photos… and, in the desktop app,
@@ -140,10 +151,34 @@
 - In dialogs, the confirm button is on the right with Cancel to its left, and filled with the accent when it makes or
   brings in something (Import N Photos, Merge, Save, Create, Download…). Delete and Remove stay plain, so a destructive
   choice is never the eye-catching default.
+### Straight brush strokes with ⇧-click
+- With the brush, click once, then ⇧-click somewhere else: the brush paints a straight line between the two, and
+  further ⇧-clicks carry on from the last point, as in Lightroom. Change the brush size, feather or flow before the
+  ⇧-click and the line tapers from the old values to the new ones. The whole line is one undo step.
+  `mask.brushStroke {connect: true}` does the same for agents.
 
 ### Hard-edged Heal and Clone spots
 - A spot with Feather at 0 no longer draws black pixels exactly on its radius. This also fixes spots at 0% Opacity
   changing pixels along their edge. The hard edge now leaves pixels on the radius unchanged.
+
+### Where the camera focused
+- **View ▸ Show Focus Point** (⌥F) draws the autofocus frame the camera recorded over the photo, in Detail, Compare
+  and Survey, following rotation and crops; the Info panel says how it focused (`AF-C · Wide · Animal Eye Tracking`).
+  Lightroom has no such view.
+- **Z zooms to it**: Toggle Zoom centres on the focus point, so checking that the subject is sharp is one key
+  (View ▸ Zoom to Focus Point turns this off). Photos without a point zoom as before.
+- Sony α1 (ILCE-1) and A7S III (ILCE-7SM3) raws for now; manual-focus shots and Wide shots that only report the frame
+  centre show nothing. More cameras will follow. Details: [focus-points.md](focus-points.md).
+- **Photos already in your library get theirs in the background**: LightCraft reads just the few kilobytes of each
+  file that hold the focus point (about 100 photos a second from a spinning disk), with a *Reading focus points* row
+  in the activity stack you can stop. Photo ▸ Read Focus Points runs it by hand.
+
+### Cleaner HDR merges
+- Bright windows in an HDR made with Photo ▸ Photo Merge ▸ HDR no longer take a magenta tinge from the brighter
+  photos along the areas they clipped: right next to a clipped area, a photo's colour isn't used. It showed most when
+  the highlights were darkened or saturated.
+- The same photos give the same HDR whatever order they are selected in; before, a different order could change a
+  few pixels.
 
 ### HDR merges keep the white balance
 - An HDR merged from raws that LightCraft colours from the camera's JPEG (CR2, NEF, ARW…) now opens at the same
@@ -235,6 +270,23 @@
   else (issue #1504): trimming or clearing the cache can't delete files outside it, and thumbnails are never read
   from or written through such a link.
 
+### Synchronize Folder asks a network share less
+- A Synchronize Folder scan no longer asks the disk about every photo of the library in the folder (is its file
+  there, has it a sidecar): it has just listed the folder, and reads the answers off the listing. On a network share
+  each of those questions is a round trip. Measured on a hard disk over SMB, for folders of 1,600 to 2,400 photos
+  that had not changed: 4.6 to 7.1 s of questions after the listing (about 3 ms a photo), now under 0.05 s. The
+  listing itself took 4 to 5 s and is as it was.
+- The disk is still asked wherever a listing can't be sure what a file system would say: about a name that is
+  there in another case, a link, a name Windows reads another way (`aux.jpg`, a `~`, a `:`, a dot or a space at the
+  end), a folder the scan did not walk to its end, and, in a folder that holds any name with a character outside
+  ASCII (an umlaut, a curly apostrophe, a dash), about every name the folder does not list. Names it does list are
+  answered there too. In such a folder the scan saves less, and its checks now start after the listing where they
+  ran beside it.
+- A photo the folder lists is there for the scan, also where its file could not be opened by its path (a folder
+  that may be listed but not searched, a path longer than the system takes): such photos used to be listed as
+  missing. And a share that drops after the scan has listed a folder no longer turns that folder's photos into
+  missing ones.
+
 ### Large libraries: Synchronize Folder, import and sidecars start sooner
 - Opening Synchronize Folder, an import review or an import no longer makes a table of every photo in the library
   before it looks at the first file. In a library of 3.5 million photos that held the window for about 6 s before
@@ -304,6 +356,12 @@
   with NVIDIA), LightCraft still stops, because its window can't keep drawing on the lost device, but it now says
   "LightCraft stopped unexpectedly" and why, instead of "could not open its window", and the next start renders
   on the CPU and explains how to turn the GPU back on.
+
+### Resetting a slider
+- Resting the pointer on a slider's name or its thumb now says that a double-click resets it ("Exposure — double-click
+  to reset it"), in every language (issue #1436).
+- A double-click on the thumb is a single step in History and Undo. Its first click no longer nudges the value to
+  where the pointer landed, and a single click on the thumb leaves the value alone.
 
 ### Slider drags on large raws
 - Dragging a slider no longer re-renders the edited photo's filmstrip thumbnail on every frame; it follows once you

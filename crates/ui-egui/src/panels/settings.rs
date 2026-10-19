@@ -107,7 +107,7 @@ pub(super) fn choices<V: PartialEq + Copy>(ui: &mut egui::Ui, id: &str, options:
 fn general_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     row(ui, t, crate::i18n::tr("Language"), |ui| {
         let languages: Vec<_> = crate::i18n::Locale::ALL.iter().map(|language| (*language, language.name())).collect();
-        // Twelve language names do not fit one line in a narrow window: wrap them.
+        // Thirteen language names do not fit one line in a narrow window: wrap them.
         ui.horizontal_wrapped(|ui| {
             choices(ui, "settingsLanguage", &languages, &mut app.ui.language);
         });
@@ -149,6 +149,7 @@ fn general_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     heading(ui, t, crate::i18n::tr("Culling"));
     check(ui, "settings.autoAdvance", &mut app.ui.auto_advance, "Auto Advance: move to the next photo after rating or flagging");
     check(ui, "settings.confirmDelete", &mut app.ui.settings.confirm_delete, "Confirm before moving photos to Recently Deleted");
+    check(ui, "settings.askBeforeMove", &mut app.ui.settings.ask_before_move, "Confirm before moving photos to another folder on disk");
     heading(ui, t, crate::i18n::tr("External Editing"));
     row(ui, t, crate::i18n::tr("PhotoCraft"), |ui| {
         crate::text_field::TextField::singleline("field:photocraftPath", &mut app.ui.settings.photocraft_path)

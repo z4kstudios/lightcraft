@@ -125,6 +125,69 @@ fn bracket_merge_recovers_radiance_and_alignment() {
     assert!(rmed < 0.05, "recovered highlights: median log error {rmed}");
 }
 
+/// The result doesn't depend on the order the frames come in: every permutation of a bracket gives the same radiance and
+/// deghost overlay, bit for bit, and the same per-frame results for each frame. (Real brackets merged in the app's
+/// selection order and in the CLI's file order differed on 0.6 % of their pixels: alignment seeds followed the input
+/// positions.)
+#[test]
+fn merge_does_not_depend_on_the_frame_order() {
+    let t = truth();
+    let shifts = [(3.25f32, -2.0f32), (0.0, 0.0), (-4.0, 1.5)];
+    let ks = [0.25f32, 1.0, 4.0];
+    let shot: Vec<Frame> = (0..3).map(|i| shoot(&t, ks[i], shifts[i].0, shifts[i].1, i as u64 + 1)).collect();
+    let opts = HdrOptions { align: true, deghost: Deghost::Medium };
+    let base = merge_hdr(shot.clone(), &opts, &no_progress).unwrap();
+    assert_eq!(base.reference, 1);
+    for perm in [[2usize, 0, 1], [1, 2, 0], [0, 2, 1]] {
+        let r = merge_hdr(perm.iter().map(|&i| shot[i].clone()).collect(), &opts, &no_progress).unwrap();
+        assert!(r.radiance.data == base.radiance.data, "{perm:?}: the radiance differs");
+        assert!(r.ghost.data == base.ghost.data, "{perm:?}: the deghost overlay differs");
+        assert_eq!(perm[r.reference], base.reference, "{perm:?}");
+        for (p, &i) in perm.iter().enumerate() {
+            assert_eq!(r.ev[p], base.ev[i], "{perm:?}");
+            assert_eq!(r.alignments[p].h, base.alignments[i].h, "{perm:?}");
+        }
+    }
+}
+
+/// Pixels demosaiced next to clipped photosites read low in the clipped channel (real ARW brackets: the brightest
+/// frame's green 3–5 % low within 2 px of clipped pixels, linear to 1 % elsewhere); the merge must not take them from
+/// that frame, or bright windows get magenta fringes. Here the +2 EV frame's green is 5 % low around its clipped areas.
+#[test]
+fn pixels_next_to_clipped_ones_do_not_tint_the_merge() {
+    let t = truth();
+    let ks = [0.25f32, 1.0, 4.0];
+    let mut frames: Vec<Frame> = (0..3).map(|i| shoot(&t, ks[i], 0.0, 0.0, i as u64 + 1)).collect();
+    let (w, h) = (frames[2].image.width, frames[2].image.height);
+    let clipped = |img: &Rgb32f, x: usize, y: usize| img.data[y * w + x].iter().any(|&v| v >= 1.0);
+    let mut ring = vec![false; w * h];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let img = &frames[2].image;
+            ring[y * w + x] = !clipped(img, x, y) && (y - 1..=y + 1).any(|yy| (x - 1..=x + 1).any(|xx| clipped(img, xx, yy)));
+        }
+    }
+    for (p, &r) in frames[2].image.data.iter_mut().zip(&ring) {
+        if r {
+            p[1] *= 0.95;
+        }
+    }
+    let r = merge_hdr(frames, &HdrOptions { align: false, deghost: Deghost::None }, &no_progress).unwrap();
+    let ratio = |p: [f32; 3]| p[1] / (p[0] + p[2]);
+    let mut devs = Vec::new();
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let want = t.get(x + M, y + M);
+            if ring[y * w + x] && want[0] > 0.01 && want[2] > 0.01 {
+                devs.push(ratio(r.radiance.get(x, y)) / ratio(want) - 1.0);
+            }
+        }
+    }
+    assert!(devs.len() > 500, "ring pixels: {}", devs.len());
+    let med = pct(devs, 0.5);
+    assert!(med.abs() < 0.01, "green against red and blue on the ring: {:+.2} %", 100.0 * med);
+}
+
 #[test]
 fn deghost_removes_a_moving_object() {
     let t = truth();

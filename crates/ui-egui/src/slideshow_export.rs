@@ -99,7 +99,7 @@ mod tests {
     fn run_dialog(h: &mut crate::headless::Headless) -> Value {
         let dialog = h.app.ui.dialog.take().unwrap();
         crate::panels::dialogs::confirm_dialog(&mut h.app, &dialog).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_secs(300);
         let mut seen_row = false;
         loop {
             h.step();

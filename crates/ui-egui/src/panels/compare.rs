@@ -280,6 +280,9 @@ fn photo_tile(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId, slot: Slo
     if photo.flag == Flag::Reject {
         p.rect_filled(display, 0.0, Color32::from_black_alpha(110));
     }
+    if app.ui.settings.focus_point {
+        super::detail::draw_focus_point(&p, display, &photo, &format!("compare:focusPoint:{}", id.0));
+    }
     let active = app.session.selection.active == Some(id);
     if active {
         p.rect_stroke(display.intersect(img_area.shrink(1.0)), 0.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);

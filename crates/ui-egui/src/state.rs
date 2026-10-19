@@ -343,6 +343,9 @@ pub struct AppSettings {
     /// `confirmDelete: false` by default (#1239).
     #[serde(rename = "askBeforeDelete")]
     pub confirm_delete: bool,
+    /// Ask before photos dropped on a Folders row move there on disk (the dialog's "Don't ask
+    /// again" turns it off).
+    pub ask_before_move: bool,
     /// GPU rendering allowed (`app.gpu`).
     pub gpu: bool,
     /// Largest long edge (pixels) the user lets the loupe render at; 0 = Automatic (the size it is
@@ -383,6 +386,11 @@ pub struct AppSettings {
     /// The Keywording box: whole keyword paths, or grouped by the keyword they are inside.
     #[serde(deserialize_with = "lenient")]
     pub keyword_chips: KeywordChips,
+    /// View ▸ Show Focus Point: draw the box the camera focused on (`view.focusPoint`).
+    pub focus_point: bool,
+    /// View ▸ Zoom to Focus Point: Toggle Zoom (Z) centres the zoomed view on the camera's focus point
+    /// when the photo has one (`view.zoomToFocus`).
+    pub zoom_to_focus: bool,
 }
 
 impl Default for AppSettings {
@@ -392,6 +400,7 @@ impl Default for AppSettings {
             recent_libraries: Vec::new(),
             startup_view: StartupView::Last,
             confirm_delete: true,
+            ask_before_move: true,
             gpu: true,
             preview_limit: 0,
             external_editor: String::new(),
@@ -409,6 +418,8 @@ impl Default for AppSettings {
             favorite_themes: Vec::new(),
             display_profile: String::new(),
             keyword_chips: KeywordChips::default(),
+            focus_point: false,
+            zoom_to_focus: true,
         }
     }
 }
@@ -1189,6 +1200,17 @@ pub enum Dialog {
     /// Confirm moving photos to Recently Deleted.
     ConfirmDelete {
         count: usize,
+    },
+    /// Confirm moving photos dropped on a Folders row into that folder on disk
+    /// (`photo.moveToFolder`). `name`: the folder's name, as the question says it.
+    MovePhotos {
+        ids: Vec<u64>,
+        folder: String,
+        name: String,
+        dont_ask: bool,
+        /// The library the photos were dropped in (`Session::library_generation`): ids are
+        /// numbered per library, so in another one they name other photos.
+        library: u64,
     },
     /// Confirm taking a folder's photos out of the library (`library.removeFolder`).
     RemoveFolder {

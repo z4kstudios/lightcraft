@@ -2189,6 +2189,40 @@ mod tests {
         assert!(mean(&a) > mean(&b) + 10.0, "two stops brighter after: {} vs {}", mean(&a), mean(&b));
     }
 
+    // LR-VIEW-ZOOM: what the loupe shows at 1:1 is what an export at full size writes. A window of
+    // the zoomed frame (the photo's own pixels) is pixel-for-pixel the export, at the centre and
+    // at a corner, with tone, colour and detail edits on a camera-sized photo
+    #[test]
+    fn one_to_one_window_pixels_are_export_pixels() {
+        use lightcraft_pipeline::{OutputDepth, OutputSpace, PixelWindow};
+        let mut s = crate::Session::with_demo();
+        let id = s.active().unwrap();
+        let p = s.catalog.photo(id).unwrap().clone();
+        let (w, h) = (p.width as usize, p.height as usize);
+        assert!(w.max(h) > 2560, "larger than the preview cap: {w}×{h}");
+        let mut d = (*s.develop_of(id).unwrap()).clone();
+        d.light.exposure = 0.7;
+        d.light.contrast = 25.0;
+        d.color.saturation = 20.0;
+        s.set_develop(id, d, "Edits").unwrap();
+        let export = s.render_export(id, w, h, OutputSpace::Srgb, OutputDepth::U8).unwrap().image;
+        assert_eq!((export.width, export.height), (w, h), "a full-size export");
+        for win in [PixelWindow { x: w / 2 - 256, y: h / 2 - 256, w: 512, h: 384 }, PixelWindow { x: 0, y: h - 300, w: 400, h: 300 }] {
+            let tile = s.region_job(id, w, h, win, true).unwrap().run().rendered.unwrap().image;
+            assert_eq!((tile.width, tile.height), (win.w, win.h));
+            let mut worst = 0u8;
+            for y in 0..win.h {
+                for x in 0..win.w {
+                    let (a, b) = (tile.data[y * win.w + x], export.data[(win.y + y) * w + win.x + x]);
+                    for k in 0..3 {
+                        worst = worst.max(a[k].abs_diff(b[k]));
+                    }
+                }
+            }
+            assert!(worst <= 1, "window {win:?}: the 1:1 view differs from the export by up to {worst} levels");
+        }
+    }
+
     /// The thumbnail of a photo whose preview-level source is decoded is cut from it: the file (here
     /// one nothing can decode) is not read again.
     #[test]

@@ -240,6 +240,10 @@ fn fill_missing_meta(id: lightcraft_catalog::PhotoId, ph: &lightcraft_catalog::P
     m.aperture = m.aperture.or(src.aperture);
     m.iso = m.iso.or(src.iso);
     m.gps = m.gps.or(src.gps);
+    // the camera's focus point: photos imported before it was read get it here
+    if m.focus.is_none() {
+        m.focus = src.focus.clone();
+    }
     let mut ops = Vec::new();
     if m != before {
         ops.push(Op::SetMeta { id, meta: Box::new(m) });
@@ -439,6 +443,27 @@ mod tests {
         ph.meta = (**meta).clone();
         ph.captured = Some("2026-10-04T08:16:11".into());
         assert!(fill_missing_meta(PhotoId(1), &ph, &info).is_empty());
+    }
+
+    /// Reload from Disk gives a photo imported before focus points were read its camera focus point,
+    /// and never replaces one it has.
+    #[test]
+    fn reload_fills_a_missing_focus_point() {
+        let fp = |x: f64| lightcraft_meta::FocusPoint {
+            rect: lightcraft_meta::Rect { x0: x, y0: 0.4, x1: x + 0.02, y1: 0.42 },
+            mode: Some("AF-C".into()),
+            area: None,
+            tracking: None,
+        };
+        let mut ph = Photo::new(PhotoId(1), Source::File { path: "/x.arw".into() }, "x.arw", "ARW", 8640, 5760, "2026-10-06T00:00:00");
+        ph.captured = Some("2026-10-04T08:16:11".into());
+        let mut info = crate::media::ProbeInfo { captured: ph.captured.clone(), ..Default::default() };
+        info.meta.focus = Some(fp(0.3));
+        let ops = fill_missing_meta(PhotoId(1), &ph, &info);
+        let Some(Op::SetMeta { meta, .. }) = ops.first() else { panic!("{ops:?}") };
+        assert_eq!(meta.focus, Some(fp(0.3)));
+        ph.meta.focus = Some(fp(0.1));
+        assert!(fill_missing_meta(PhotoId(1), &ph, &info).is_empty(), "a known focus point is kept");
     }
 
     fn lens() -> lightcraft_develop::EmbeddedLens {

@@ -291,5 +291,9 @@
   "Renames {n} face{} across the library. The files are not changed.": "Benennt {n} Gesichter in der Bibliothek um. Die Dateien werden nicht geändert.{:.0}",
   "“{to}” is already a person. Combining them makes one person; Undo separates them again.": "„{to}“ ist bereits eine Person. Zusammenführen ergibt eine Person; Rückgängig trennt sie wieder.",
   "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has": "{what}-Zusammenfügung mit {mp} hinzugefügt: die volle Größe, {full}, braucht mehr Arbeitsspeicher, als dieser Computer hat",
-  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "{what}-Zusammenfügung mit {mp} hinzugefügt, der größten möglichen Panoramagröße (volle Größe: {full})"
+  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "{what}-Zusammenfügung mit {mp} hinzugefügt, der größten möglichen Panoramagröße (volle Größe: {full})",
+  "Already in “{}”": "Bereits in „{}“",
+  "Move {n} photo{} to “{}”": "{n} Foto{0} nach „{1}“ verschieben",
+  "Move {n} photo{} to “{}”?": "{n} Foto{0} nach „{1}“ verschieben?",
+  "Moved {n} photo{} to “{}”. Edit → Undo moves them back.": "{n} Foto{0} nach „{1}“ verschoben. Bearbeiten → Rückgängig holt sie zurück."
 }

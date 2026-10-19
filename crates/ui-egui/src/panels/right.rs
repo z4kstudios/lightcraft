@@ -910,7 +910,26 @@ fn camera_card(ui: &mut egui::Ui, p: &lightcraft_catalog::Photo) {
                 }
             });
         }
+        // where the camera focused, and how (View ▸ Show Focus Point draws it): only when known; the
+        // whole card's width, so "AF-C · Expanded Flexible Spot · Face tracking" fits
+        if let Some(text) = focus_text(m.focus.as_ref()) {
+            ui.add_space(3.0);
+            let r = ui.horizontal_wrapped(|ui| {
+                ui.label(dim(crate::i18n::tr("Focus")));
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new(text).size(12.0).color(t.text));
+            });
+            register(ui.ctx(), "info:focus", r.response.rect);
+        }
     });
+}
+
+/// The camera's focus mode, AF area and tracking in the interface language ("AF-C · Wide · Animal Eye
+/// Tracking"), or `None` when the photo has no focus point.
+pub(crate) fn focus_text(f: Option<&lightcraft_meta::FocusPoint>) -> Option<String> {
+    let f = f?;
+    let words: Vec<&str> = f.words().into_iter().map(crate::i18n::tr).collect();
+    Some(if words.is_empty() { crate::i18n::tr("Focus point").to_string() } else { words.join(" · ") })
 }
 
 fn human_size(bytes: u64) -> String {

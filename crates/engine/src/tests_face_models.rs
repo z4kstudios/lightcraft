@@ -627,3 +627,17 @@ fn recognition_cannot_be_turned_on_without_a_chosen_model() {
     assert!(s.execute("faces.enable", &json!({"enabled": true})).is_err());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_cpu_only_switch_is_kept_and_bad_values_are_refused() {
+    let d = temp("cpu-only");
+    let mut s = session(&d);
+    assert_eq!(s.execute("faces.gpu", &json!({})).unwrap()["cpuOnly"], false);
+    assert_eq!(s.execute("faces.gpu", &json!({"cpuOnly": true})).unwrap()["cpuOnly"], true);
+    // kept with the models, so a new session starts on the CPU too
+    let mut again = session(&d);
+    assert_eq!(again.execute("faces.models.list", &json!({})).unwrap()["gpu"]["cpuOnly"], true);
+    assert!(again.execute("faces.gpu", &json!({"cpuOnly": "yes"})).is_err());
+    assert_eq!(again.execute("faces.gpu", &json!({"cpuOnly": false})).unwrap()["cpuOnly"], false);
+    let _ = std::fs::remove_dir_all(d);
+}

@@ -30,6 +30,16 @@ pub fn load(s: &mut Session) {
             creator: "LightCraft Demo".into(),
             ..Default::default()
         };
+        // one demo photo carries a camera focus point (as a Sony raw would), on the bloom's centre, so
+        // View ▸ Show Focus Point and Zoom to Focus Point can be tried without a camera file
+        if sc.name == "Cosmos bloom" {
+            p.meta.focus = Some(lightcraft_meta::FocusPoint {
+                rect: lightcraft_geom::Rect { x0: 0.42, y0: 0.433, x1: 0.50, y1: 0.487 },
+                mode: Some("AF-S".into()),
+                area: Some("Flexible Spot".into()),
+                tracking: None,
+            });
+        }
         p.rating = [0, 3, 4, 5, 2, 0, 4, 3][sc.id as usize % 8];
         p.flag = match sc.id % 6 {
             1 => Flag::Pick,

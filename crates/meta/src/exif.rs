@@ -23,6 +23,8 @@ pub fn try_read_exif(bytes: &[u8]) -> Result<Metadata, TiffError> {
     if m.lens_model.is_none() {
         m.lens_model = panasonic_maker_note_lens(data, &tiff);
     }
+    // the maker note's values are offsets into the stream, which `from_tiff` doesn't have
+    m.focus = crate::focus::read(data, &tiff, m.make.as_deref(), m.model.as_deref(), m.orientation);
     Ok(m)
 }
 

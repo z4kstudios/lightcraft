@@ -157,7 +157,7 @@ essentials replaces its guessed 45% raw look with 84% × 0.75 (+1 point).
 
 | Discount | Mainstream | Essentials | Evidence |
 |---|---:|---:|---|
-| Interaction fidelity / UI clarity | ×0.95 | ×0.95 | brush live preview gaps and feathering (#517, #518); crop artefacts and limits (#731, #742, #770, #771); Compare white-balance selector (#743–#745); low-res slider previews (#330); dialogs taller than the window (#781); mouse-wheel scroll (#714); 100% zoom capped (gap 4) |
+| Interaction fidelity / UI clarity | ×0.95 | ×0.95 | brush live preview gaps and feathering (#517, #518); crop artefacts and limits (#731, #742, #770, #771); Compare white-balance selector (#743–#745); low-res slider previews (#330); dialogs taller than the window (#781); mouse-wheel scroll (#714) |
 | Stability on real machines | ×0.92 | ×0.92 | launch and quit crashes or silent startup failures (#250 macOS 12 Intel, #315 Windows Intel GPU, #431 Intel Mac, #260, #462, #783 Linux / Nouveau, #790 Windows installer); tests run in CI on FreeBSD only (gap 9) |
 | File exchange with Lightroom users (mainstream) / opening files people send (essentials) | ×0.92 | ×0.95 | Adobe XMP sidecars change colours (#290), XMP CameraProfile and Upright ignored (#204, #205), catalog import fails (#599), same Light values render differently (#523, #209), no write-back to `.lrcat`; for casual users: CR3 beyond verified bodies, compressed ORF, HE NEF open as previews (#473, #485, #556), HEIC trouble (#693) |
 | **Product** | **×0.804** | **×0.830** | |
@@ -235,13 +235,13 @@ open as previews, and colour on every non-DNG raw is estimated rather than measu
 
 **Alpha gate:** all six core workflows (import, cull, develop, save and reopen, batch looks, export)
 work end to end on macOS; see the table in [roadmap.md](roadmap.md#alpha-gate). The partial rows (CR3
-variants, compressed ORF, HE NEF as previews; capped 100% zoom) degrade but don't block a workflow.
+variants, compressed ORF, HE NEF as previews) degrade but don't block a workflow.
 
-**To beta:** ~14 points of readiness, **~340–600 h**: the nine `B` gaps in [gaps.md](gaps.md)
+**To beta:** ~14 points of readiness, **~340–600 h**: the `B` gaps in [gaps.md](gaps.md)
 (~230–430 h), plus burning down the ~92 open core-path user issues (40–80 h) and stability work
 around them. Beta needs: CR3, ORF and
 HE NEF decoding from sensor data; measured colour for the popular models and a fidelity suite with
-scores; full-resolution zoom; Subject / Sky / People masks; a lens profile database for the
+scores; Subject / Sky / People masks; a lens profile database for the
 popular lenses; tests in CI on macOS, Windows and Linux.
 
 ## How hours are calibrated
@@ -303,6 +303,7 @@ P2 items 12–25 h; look tuning, performance, packaging, hardening 25–45 h.
 | 2026-10-14 | minor | Localization ~52% → ~55% (mean of the 12 key languages): de, es, fr, ja and uk catalogs filled |
 | 2026-10-12 | minor | UI/UX remaining 34–58 h → 32–54 h (canvas tools by keyboard); headline numbers unchanged |
 | 2026-10-14 | minor | Merge and HDR: merge 100% → 88% (LR-MERGE-HDR ✅ → 🟡 after testing on real 67 MP brackets; gap 29); area percentages unchanged |
+| 2026-10-14 | minor | Gap 4 (full-resolution zoom) closed: removed from the interaction-fidelity notes, the alpha-gate partial rows and the beta needs; headline numbers and the ×0.95 interaction factor unchanged |
 | 2026-10-12 | minor | UI/UX remaining 40–70 h → 34–58 h (accessibility audit landed, ui-parity.md); percentages unchanged |
 | 2026-10-14 | minor | Camera-coverage sweep (#1327): 30 models verified on 40 CC0 files (`coverage_sweep_corpus.rs`, `coverage-sweep.tsv`; `docs/raw/coverage.py` 515 → 545 verified rows); the counts above are not re-measured here. Sensor verification does not establish colour parity (#1277); headline numbers unchanged |
 | 2026-10-12 | minor | 22 more CR3 bodies verified on one CC0 file each (raw-parity.md): use-weighted share whose camera decodes 85% → 92%, RAW decoding 77% → 83%; full 60.7% → 61.2% (~61%), mainstream depth 72.1% → 74.0% (~49% → ~51%), essentials depth 77.5% → 78.0% (~64% → ~65%) |

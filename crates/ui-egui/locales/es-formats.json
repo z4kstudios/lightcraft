@@ -291,5 +291,9 @@
   "Renames {n} face{} across the library. The files are not changed.": "Cambia el nombre de {n} cara{} en toda la biblioteca. Los archivos no se modifican.",
   "“{to}” is already a person. Combining them makes one person; Undo separates them again.": "“{to}” ya es una persona. Combinarlas deja una sola; Deshacer las separa de nuevo.",
   "{what} merge added at {mp}: its full size, {full}, needs more memory than this computer has": "Combinación {what} añadida a {mp}: el tamaño completo, {full}, necesita más memoria de la que tiene este ordenador",
-  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "Combinación {what} añadida a {mp}, el tamaño máximo de una panorámica (tamaño completo: {full})"
+  "{what} merge added at {mp}, the largest a panorama can be (its full size is {full})": "Combinación {what} añadida a {mp}, el tamaño máximo de una panorámica (tamaño completo: {full})",
+  "Already in “{}”": "Ya está en “{}”",
+  "Move {n} photo{} to “{}”": "Mover {n} foto{0} a “{1}”",
+  "Move {n} photo{} to “{}”?": "¿Mover {n} foto{0} a “{1}”?",
+  "Moved {n} photo{} to “{}”. Edit → Undo moves them back.": "{n} foto{0} movida{0} a “{1}”. Editar → Deshacer las devuelve."
 }

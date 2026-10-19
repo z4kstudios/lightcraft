@@ -1765,6 +1765,7 @@ fn folder_row(app: &mut LightcraftApp, ui: &mut egui::Ui, n: &FolderNode, id: &s
     };
     let mark = n.label.map(crate::theme::label_color);
     let resp = row_sensed(app, ui, id, Icon::Folder, name, Some(&spoken), Some(n.count), sel, indent, Sense::click(), mark);
+    folder_drop_target(app, ui, &resp, n, open_id, open);
     let mut toggled = false;
     if !n.children.is_empty() {
         let tr = tree_toggle(ui, &resp, indent, open_id, open, format!("libraryFolderToggle:{}", n.path));
@@ -1784,6 +1785,134 @@ fn folder_row(app: &mut LightcraftApp, ui: &mut egui::Ui, n: &FolderNode, id: &s
         }
     }
     row_menu(app, &resp, n);
+}
+
+/// How long photos dragged over a closed Folders row wait before it opens, so a folder inside it
+/// can be reached.
+const SPRING_OPEN_SECONDS: f64 = 0.7;
+
+/// A Folders row while photos are dragged from the grid: a release moves their files there on
+/// disk (`photo.moveToFolder`, one undo step). The row lights up and the dragged label says where
+/// they will go, as the same gesture onto an album only adds them to it. Held over a closed row,
+/// it opens. Photos that can't go there leave it dark (a row covering several disks; Local photos,
+/// not in the library) and a release says why; photos already there say so.
+fn folder_drop_target(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Response, n: &FolderNode, open_id: egui::Id, open: &mut bool) {
+    let Some(ids) = app.ui.dragging_photos.clone() else { return };
+    // only where the row can be seen: not scrolled out of the sidebar or beneath the pinned header
+    if !pointer_over_row(ui, resp.rect) {
+        return;
+    }
+    spring_open(ui, n, open_id, open);
+    let name = std::path::Path::new(&n.path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| n.name.clone());
+    let photos: Vec<_> = ids.iter().filter_map(|id| app.session.catalog.photo(lightcraft_catalog::PhotoId(*id))).collect();
+    let refused = if !n.selectable {
+        Some(crate::i18n::tr("This row covers more than one disk: drop on a folder inside it"))
+    } else if photos.iter().any(|p| p.local) {
+        Some(crate::i18n::tr("Local photos aren't in the library yet: Add to My Photos first, then move them"))
+    } else {
+        None
+    };
+    let here = |p: &lightcraft_catalog::Photo| match &p.source {
+        lightcraft_catalog::Source::File { path } => std::path::Path::new(path).parent().is_some_and(|d| same_folder(&d.to_string_lossy(), &n.path)),
+        _ => false,
+    };
+    let all_here = !photos.is_empty() && photos.iter().all(|p| here(p));
+    let count = photos.len();
+    let released = ui.input(|i| i.pointer.any_released());
+    let hint = match (&refused, all_here) {
+        (Some(_), _) => crate::i18n::tr("Can't be moved here").to_string(),
+        (None, true) => crate::i18n::tr_format!("Already in “{}”", name),
+        (None, false) => crate::i18n::tr_format!("Move {n} photo{} to “{}”", if count == 1 { "" } else { "s" }, name, n = count),
+    };
+    super::grid::drag_hint(ui.ctx(), hint);
+    if let Some(why) = refused {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+        if released {
+            app.toast(ui.ctx(), why);
+            app.ui.dragging_photos = None;
+        }
+        return;
+    }
+    if all_here {
+        if released {
+            app.ui.dragging_photos = None;
+        }
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    ui.painter().rect_stroke(resp.rect.shrink2(vec2(8.0, 1.0)), 4.0, egui::Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+    if released {
+        app.ui.dragging_photos = None;
+        // a drop moves files on disk: asked first (as Lightroom Classic does), unless the person
+        // said not to; the menu's Move Selected Photos Here is asked for by name and goes at once
+        if app.ui.settings.ask_before_move {
+            let library = app.session.library_generation();
+            app.ui.dialog = Some(crate::state::Dialog::MovePhotos { ids, folder: n.path.clone(), name, dont_ask: false, library });
+        } else {
+            move_photos_here(app, ui.ctx(), Some(&ids), &n.path, &name);
+        }
+    }
+}
+
+/// Photos dragged over the closed row `n` for [`SPRING_OPEN_SECONDS`] open it (a row with folders
+/// inside it). Restarts on each row the pointer comes to, and when it comes back to one after
+/// leaving it (or after another drag).
+fn spring_open(ui: &egui::Ui, n: &FolderNode, open_id: egui::Id, open: &mut bool) {
+    if *open || n.children.is_empty() {
+        return;
+    }
+    let key = egui::Id::new("folder-spring-open");
+    let (now, frame) = (ui.input(|i| i.time), ui.ctx().cumulative_frame_nr());
+    // held without a break: over this row last frame too
+    let since = match ui.data(|d| d.get_temp::<(String, f64, u64)>(key)) {
+        Some((path, since, seen)) if path == n.path && seen.saturating_add(1) >= frame => since,
+        _ => now,
+    };
+    ui.data_mut(|d| d.insert_temp(key, (n.path.clone(), since, frame)));
+    if now - since >= SPRING_OPEN_SECONDS {
+        *open = true;
+        set_tree_open(ui, open_id, true);
+        ui.data_mut(|d| d.remove::<(String, f64, u64)>(key));
+    } else {
+        // keep the clock running while the pointer rests
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Move photos (`ids`, else the selection) into the folder `path` on disk (`photo.moveToFolder`).
+/// Photos that leave the view leave the selection, so nothing done next (Delete, an edit) reaches
+/// photos no longer on screen. How many moved, or why none did.
+pub(crate) fn move_photos(app: &mut LightcraftApp, ids: Option<&[u64]>, path: &str) -> Result<u64, String> {
+    let mut params = json!({"folder": path});
+    if let Some(ids) = ids {
+        params["ids"] = json!(ids);
+    }
+    let r = app.run("photo.moveToFolder", params)?;
+    let visible: std::collections::HashSet<lightcraft_catalog::PhotoId> = app.session.visible_cloned().into_iter().collect();
+    let sel = &mut app.session.selection;
+    sel.ids.retain(|id| visible.contains(id));
+    if sel.active.is_some_and(|a| !visible.contains(&a)) {
+        sel.active = sel.ids.first().copied();
+    }
+    Ok(r["moved"].as_u64().unwrap_or(0))
+}
+
+/// What a move of `n` photos into the folder `name` says: how many moved and that Undo moves them
+/// back, or that they were there already.
+pub(crate) fn moved_text(n: u64, name: &str) -> String {
+    if n == 0 {
+        crate::i18n::tr_format!("Already in “{}”", name)
+    } else {
+        crate::i18n::tr_format!("Moved {n} photo{} to “{}”. Edit → Undo moves them back.", if n == 1 { "" } else { "s" }, name, n = n)
+    }
+}
+
+/// [`move_photos`], saying how it went in a toast.
+fn move_photos_here(app: &mut LightcraftApp, ctx: &egui::Context, ids: Option<&[u64]>, path: &str, name: &str) {
+    match move_photos(app, ids, path) {
+        Ok(n) => app.toast(ctx, moved_text(n, name)),
+        Err(e) => app.toast(ctx, e),
+    }
 }
 
 /// The context menu of a Folders row: a folder's own, a disk's (remove it), none for the
@@ -1931,10 +2060,7 @@ fn folder_menu_for_library(app: &mut LightcraftApp, resp: &egui::Response, n: &F
                 .on_hover_text(crate::i18n::tr("Moves the files and their XMP sidecars into this folder; never overwrites"))
                 .clicked()
         {
-            match app.run("photo.moveToFolder", json!({"folder": path})) {
-                Ok(r) => app.toast(ui.ctx(), crate::i18n::tr_format!("Moved {} photo(s)", r["moved"])),
-                Err(e) => app.toast(ui.ctx(), e),
-            }
+            move_photos_here(app, ui.ctx(), None, path, &name);
             ui.close();
         }
         if app.services.reveal.is_some()

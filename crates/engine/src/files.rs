@@ -41,6 +41,7 @@ fn meta_of(m: &lightcraft_meta::Metadata) -> (Meta, Option<String>) {
         // paths from `lr:hierarchicalSubject`, names from `dc:subject` that aren't their levels
         keywords: lightcraft_catalog::keywords::from_file(&m.keywords, &m.hierarchical_keywords),
         regions: m.regions.clone(),
+        focus: m.focus.clone(),
     };
     (meta, m.capture_time.as_ref().map(|d| d.to_iso()))
 }
@@ -423,13 +424,17 @@ fn load_bytes_now(
         // (removed before the camera look's binned sensor proxy too, which needs an empty `OpcodeList3`).
         let info = raw.info();
         let lens = crate::lens_profiles::for_raw(&info, || lightcraft_meta::extract(&bytes));
+        // (the camera look still pairs the sensor with the camera JPEG through the warp the camera applied to it)
+        let lens_geometry = crate::camera_preview::lens_geometry(&raw.opcodes.list3);
         raw.opcodes.list3.retain(|op| !op.is_lens_correction());
         // Which scale white balance is edited on, and the as-shot white on it, from the file's own colour tags or
         // the camera's measured matrices (`Photo::relative_wb` decides the same from the catalog's camera)
         let scale = WbScaleOf::new(raw.format, &raw.color, raw.wb_multipliers, &raw.metadata);
         // the source's segmentation mattes (DNG semantic masks), read while the starting colour is fitted
-        let ((xy, t, camera_look), mattes) =
-            rayon::join(|| crate::camera_preview::starting_colour(&mut raw, &bytes, lens.as_ref()), || dng_mattes(&bytes, &info));
+        let ((xy, t, camera_look), mattes) = rayon::join(
+            || crate::camera_preview::starting_colour(&mut raw, &bytes, lens_geometry.as_ref(), lens.as_ref()),
+            || dng_mattes(&bytes, &info),
+        );
         drop(bytes);
         // Previews and thumbnails bin the mosaic straight to (about) the size they need; only
         // larger levels (exports, 1:1) demosaic the whole sensor.
@@ -702,8 +707,9 @@ pub(crate) fn decode_raw_preview(
     covering: Option<usize>,
 ) -> Option<lightcraft_codecs::Decoded> {
     let jpeg = stand_in_image(bytes, covering)?;
-    // the colour space is a property of the JPEG; a TIFF stand-in is read by the TIFF reader
-    let is_jpeg = matches!(jpeg, std::borrow::Cow::Owned(_));
+    // the colour space is a property of the JPEG; a TIFF stand-in (the file itself, or a Hasselblad RGB preview
+    // wrapped as a TIFF) and a JPEG XL preview are read by their own decoders
+    let is_jpeg = jpeg.starts_with(&[0xff, 0xd8]);
     match lightcraft_raw::embedded_preview_color_space(bytes).filter(|_| is_jpeg) {
         Some(space) => {
             let space = match space {

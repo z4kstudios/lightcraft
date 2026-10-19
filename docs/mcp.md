@@ -247,7 +247,7 @@ develop settings and history.
 |---|---|
 | `lightcraft://library` | Source, filter, sort, selection, undo/redo labels (`library.state`) |
 | `lightcraft://photos` | Photos in the current view (`catalog.query`) |
-| `lightcraft://photo/active` | Everything about the active photo (`photo.inspect`) |
+| `lightcraft://photo/active` | Everything about the active photo (`photo.inspect`), including the camera's focus point as `meta.focus` when the file records one ([focus-points.md](focus-points.md); `run_command photo.readFocusPoints {wait: true}` reads it for photos imported before it was read, a few KB per file) |
 | `lightcraft://develop/active` | The active photo's develop settings (`develop.get`) |
 | `lightcraft://controls` | Every develop control with its current value (`develop.controls`) |
 

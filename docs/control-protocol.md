@@ -114,6 +114,14 @@ scrolling pans in both axes and respects the operating system's scrolling direct
 These gestures work in Detail (including editing tools and full-screen preview), Compare and Reference
 views, and only apply over their image areas. Panning stops at the image edges.
 
+The camera's focus point ([focus-points.md](focus-points.md)) is `meta.focus` in `photo.inspect`: `{rect: {x0, y0,
+x1, y1}, mode?, area?, tracking?}`, normalized to the upright photo (absent when the file records none).
+`view.focusPoint {on?}` shows it over the photo (no params toggles; replies `{on}`), and `view.zoomToFocus {on?}`
+(on by default) makes `view.zoomToggle` zoom in centred on it, replying `{focus: [x, y]}` (the `pan` it set).
+`photo.readFocusPoints {ids?, wait?}` reads the point for photos imported before it was read, from a few KB of each
+file, on a background job (activity kind `focus`); `wait: true` returns the run's counts when done. The app calls
+`focus.pump {pace}` every frame to drive it.
+
 The interface theme is `view.appearance {mode?: "auto" | "light" | "dark"}` (no mode: the next one,
 Auto → Light → Dark → Auto, like the top bar's `icon:appearance` button) and `view.theme {theme:
 "charcoal" | "midnight" | "silver" | "paper"}`, which picks a theme and fixes the mode to its family.

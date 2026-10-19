@@ -248,6 +248,63 @@ pub(crate) fn output_px(frame: &Frame) -> [usize; 2] {
     [px(w), px(h)]
 }
 
+/// The camera's focus point of `photo` in the displayed frame (its crop, rotation and flips), as the
+/// normalized box over the drawn image: `None` when the photo has none or it is cropped away.
+pub(crate) fn focus_box(photo: &lightcraft_catalog::Photo) -> Option<lightcraft_geom::Rect> {
+    let f = photo.meta.focus.as_ref()?;
+    let d = &photo.develop;
+    let frame = Frame::with_lens(photo.width.max(1) as usize, photo.height.max(1) as usize, d, true, photo.embedded_lens.as_ref());
+    let [w, h] = output_px(&frame);
+    let to_out = frame.out_to_norm(w, h).inverse()?;
+    // stored on the upright photo: the user's Rotate / Flip on top, then the crop
+    let r = d.orientation.map_norm_rect(f.rect);
+    let corners = [Point::new(r.x0, r.y0), Point::new(r.x1, r.y0), Point::new(r.x0, r.y1), Point::new(r.x1, r.y1)].map(|c| {
+        let q = to_out.apply(c);
+        (q.x / w as f64, q.y / h as f64)
+    });
+    let xs = corners.map(|c| c.0);
+    let ys = corners.map(|c| c.1);
+    let out = lightcraft_geom::Rect {
+        x0: xs.iter().copied().fold(f64::INFINITY, f64::min),
+        y0: ys.iter().copied().fold(f64::INFINITY, f64::min),
+        x1: xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        y1: ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    };
+    if ![out.x0, out.y0, out.x1, out.y1].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    // its centre must be in the frame; the box may reach past the edge (it is clipped when drawn)
+    let (cx, cy) = ((out.x0 + out.x1) / 2.0, (out.y0 + out.y1) / 2.0);
+    ((0.0..=1.0).contains(&cx) && (0.0..=1.0).contains(&cy)).then_some(out)
+}
+
+/// Where Toggle Zoom centres the view on the photo's focus point (`app.ui.pan`), if it has one in frame.
+pub(crate) fn focus_pan(app: &LightcraftApp, id: PhotoId) -> Option<(f32, f32)> {
+    let r = focus_box(app.session.catalog.photo(id)?)?;
+    Some((((r.x0 + r.x1) / 2.0) as f32, ((r.y0 + r.y1) / 2.0) as f32))
+}
+
+/// Draw the camera's focus box over a photo drawn in `img` (View ▸ Show Focus Point): green corner
+/// brackets with a dark keyline, the way cameras show their AF frame, never smaller than 14 pt.
+/// `key` names it for tests and the control channel (`canvas:focusPoint`, `compare:focusPoint:<id>`).
+pub(crate) fn draw_focus_point(p: &egui::Painter, img: Rect, photo: &lightcraft_catalog::Photo, key: &str) {
+    let Some(r) = focus_box(photo) else { return };
+    let at = |x: f64, y: f64| pos2(img.left() + x as f32 * img.width(), img.top() + y as f32 * img.height());
+    let b = Rect::from_two_pos(at(r.x0, r.y0), at(r.x1, r.y1));
+    let b = Rect::from_center_size(b.center(), b.size().max(vec2(14.0, 14.0)));
+    let arm = (b.width().min(b.height()) * 0.3).max(5.0);
+    let green = Color32::from_rgb(90, 230, 110);
+    for (c, dx, dy) in [(b.left_top(), 1.0, 1.0), (b.right_top(), -1.0, 1.0), (b.left_bottom(), 1.0, -1.0), (b.right_bottom(), -1.0, -1.0)] {
+        let pts = vec![c + vec2(dx * arm, 0.0), c, c + vec2(0.0, dy * arm)];
+        p.add(egui::Shape::line(pts.clone(), Stroke::new(4.0, Color32::from_black_alpha(170))));
+        p.add(egui::Shape::line(pts, Stroke::new(2.0, green)));
+    }
+    let c = b.center();
+    p.circle_filled(c, 2.5, Color32::from_black_alpha(170));
+    p.circle_filled(c, 1.5, green);
+    register(p.ctx(), key, b);
+}
+
 /// Ease the loupe rect toward `target` while a click-zoom animation runs; otherwise follow it exactly.
 fn animated_rect(ctx: &egui::Context, anim: &mut bool, target: Rect) -> Rect {
     let t = if *anim { 0.22 } else { 0.0 };
@@ -345,12 +402,16 @@ fn request_window(app: &mut LightcraftApp, c: &WindowCtx, v: &WindowView) -> Opt
     let job = if c.interacting { job.draft() } else { job };
     let overlay = if v.before { lightcraft_pipeline::Overlay::None } else { c.overlay };
     let job = if v.before { job } else { job.with_hidden_grading(app.ui.grading_hidden_for(c.id)) };
-    let job = job.with_overlay(overlay);
+    // the After window is proofed like the whole-frame render under it; the Before side is
+    // never proofed (its whole-frame render isn't either)
+    let proof = app.ui.soft_proof.then_some(app.ui.proof);
+    let job = job.with_overlay(overlay).with_proof(if v.before { None } else { proof });
     // keyed as the renderer keys the texture (a display profile changes the key)
     let job = app.renderer.job_for(v.slot, job);
-    // The overlay is part of the tile's identity too, so changing mask view/colour never leaves a
-    // stale region tile on screen while its replacement renders.
-    let look = job.settings.hash64() ^ overlay.key().rotate_left(17);
+    // The overlay and the proof are part of the tile's identity too, so changing mask view/colour
+    // or the proof never leaves a stale region tile on screen while its replacement renders.
+    let proof_key = if v.before { 0 } else { proof.map_or(0, |p| p.key()) };
+    let look = job.settings.hash64() ^ overlay.key().rotate_left(17) ^ proof_key.rotate_left(41);
     let view = crate::region::RegionView { photo: c.id, before: v.before, key: job.key, full: (fw, fh), window: win, settings: look };
     // windows of other photos, looks and zooms of this side can't be drawn any more
     app.region_tiles.retain(|(before, _), t| *before != v.before || t.is_current(c.id, (fw, fh), look, c.interacting));
@@ -476,15 +537,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let drawn_long = target_rect.width().max(target_rect.height()) * ppp;
     // the whole frame at about canvas size; the zoomed part of it is a window render (below)
     let look = d.hash64();
-    // Diagnostic views that need whole-frame context, soft proofing, or reads too far for one
-    // window still render the whole frame at the size it is drawn. A mask overlay is window-safe.
+    // Diagnostic views that need whole-frame context, or reads too far for one window, still
+    // render the whole frame at the size it is drawn. Mask overlays and soft proofing (both act
+    // pixel by pixel) are window-safe.
     let sizes = crate::region::ViewSizes {
         drawn_long,
         canvas_long: canvas.width().max(canvas.height()) * ppp,
         native_long,
         texture_side,
         draft,
-        windows: !app.ui.soft_proof && overlay_supports_window(overlay),
+        windows: overlay_supports_window(overlay),
     };
     let mut plan = crate::region::plan(&app.ui.settings, sizes);
     if plan.window_edge.is_some_and(|edge| app.window_refused == Some((id, look, edge))) {
@@ -566,10 +628,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         app.renderer.request(Slot::Before, job, 90);
     }
     // zoomed past what the whole-frame render holds: also render the part on screen, at no more
-    // than 100 % (the GPU magnifies beyond that), for each side that is shown. Mask overlays use
-    // the same window; diagnostic overlays that need whole-frame context do not.
-    let windowable_view =
-        hover_key.is_none() && !app.ui.soft_proof && overlay_supports_window(overlay) && crate::region::same_aspect(display_aspect, aspect);
+    // than 100 % (the GPU magnifies beyond that), for each side that is shown. Mask overlays and
+    // soft proofing use the same window; diagnostic overlays that need whole-frame context do not.
+    let windowable_view = hover_key.is_none() && overlay_supports_window(overlay) && crate::region::same_aspect(display_aspect, aspect);
     let window_ctx = WindowCtx {
         id,
         overlay,
@@ -756,6 +817,9 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             }
             None => {}
         }
+    }
+    if app.ui.settings.focus_point && !crop_tool {
+        draw_focus_point(&p.with_clip_rect(img_rect.intersect(canvas)), img_rect, &photo, "canvas:focusPoint");
     }
     // a fine grid while a transform (geometry) slider is dragged, to judge verticals
     if app.ui.dragging_control.as_deref().is_some_and(|c| c.starts_with("geometry.")) {
@@ -1516,8 +1580,10 @@ fn crop_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respons
         let _ = app.run("tool.done", json!({}));
         return;
     }
+    // egui reports a drag only once the pointer has moved a few px: the zone is where the button
+    // went down, where the cursor showed it, not where the pointer is by then
     if resp.drag_started()
-        && let Some(q) = resp.interact_pointer_pos()
+        && let Some(q) = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos())
     {
         if let Err(e) = app.run("develop.beginInteraction", json!({"label": "Crop"})).and_then(|_| app.begin_crop().map(|_| serde_json::Value::Null))
         {
@@ -2110,11 +2176,14 @@ fn mask_overlay(app: &mut LightcraftApp, ui: &mut egui::Ui, resp: &egui::Respons
             app.brush_live = None;
             let pts: Vec<[f64; 2]> = points.iter().map(|q| [q.x, q.y]).collect();
             // holding ⌥ (Alt) paints with the other mode: Erase while adding, Add while erasing
-            let erase = app.ui.brush_erase != resp.ctx.input(|i| i.modifiers.alt);
+            let (alt, shift) = resp.ctx.input(|i| (i.modifiers.alt, i.modifiers.shift));
+            let erase = app.ui.brush_erase != alt;
+            // a ⇧-click draws a straight line from where the last stroke ended, as in Lightroom
+            let connect = shift && resp.clicked() && pts.len() == 1;
             let _ = app.run(
                 "mask.brushStroke",
                 json!({"points": pts, "size": app.ui.brush_size, "feather": app.ui.brush_feather, "flow": app.ui.brush_flow,
-                       "erase": erase, "autoMask": app.ui.brush_auto_mask, "pressure": pressure}),
+                       "erase": erase, "autoMask": app.ui.brush_auto_mask, "pressure": pressure, "connect": connect}),
             );
         }
         return;

@@ -1118,6 +1118,18 @@ const RAW_SAMPLES: &[(&str, &str, &str)] = &[
         "83c82be0be8865d796096dfbcc8ef2abf5af1bd37db44dfad6715070b0c99d15",
     ),
     (
+        // Z 6II, NIKKOR Z 24-200 at 70 mm, Vivid picture control (not used to fit the bundled Z 6II profile)
+        "nef-nikon-z6ii-lossless.nef",
+        "https://raw.pixls.us/getfile.php/4160/nice/Nikon%20-%20Z%206_2%20-%2014bit%20compressed%20(Lossless)%20(3:2).NEF",
+        "1b67d15817dbd4143a1f1089e2f09e319a2a2327c124e2643284509dd7621030",
+    ),
+    (
+        // Z 8, NIKKOR Z 14-24 f/2.8 S (not used to fit the bundled Z 8 profile)
+        "nef-nikon-z8-lossless.nef",
+        "https://raw.pixls.us/data/Nikon/Z%208/Nikon_Z8_raw_14_bit_lossless_compression.NEF",
+        "c13a8675294456b9c979e6c1e556951654f35377b2870af2874bfb556f21ce40",
+    ),
+    (
         "nrw-nikon-b700-uncompressed.nrw",
         "https://raw.pixls.us/getfile.php/1621/nice/Nikon%20-%20COOLPIX%20B700%20-%2012bit%2012bit%20uncompressed%20%284:3%29.NRW",
         "a175d5892304e79282add07eacf4bdc498ca3f050af48cf989c080355b4735ec",

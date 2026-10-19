@@ -908,6 +908,13 @@ fn folder_breadcrumbs(app: &mut LightcraftApp, ui: &mut egui::Ui, path: &str) {
 
 /// While photos are dragged: a badge at the pointer; the drag ends when the button is up
 /// (drop targets act on the release frame, before this runs).
+/// What the label following dragged photos says this frame instead of how many there are: where a
+/// drop would put them (set by the drop target under the pointer, read by [`drag_feedback`]).
+pub fn drag_hint(ctx: &egui::Context, text: String) {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("drag-photos-hint"), (frame, text)));
+}
+
 pub fn drag_feedback(app: &mut LightcraftApp, ctx: &egui::Context) {
     let Some(ids) = &app.ui.dragging_photos else { return };
     let (released, down, pos) = ctx.input(|i| (i.pointer.any_released(), i.pointer.any_down(), i.pointer.latest_pos()));
@@ -919,13 +926,14 @@ pub fn drag_feedback(app: &mut LightcraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let n = ids.len();
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    // a drop target under the pointer says where they would go (only this frame's)
+    let frame = ctx.cumulative_frame_nr();
+    let hint = ctx.data(|d| d.get_temp::<(u64, String)>(egui::Id::new("drag-photos-hint"))).filter(|(f, _)| *f == frame).map(|(_, text)| text);
+    let text = hint.unwrap_or_else(|| crate::i18n::tr_format!("{n} photo{}", if n == 1 { "" } else { "s" }, n = n));
     egui::Area::new(egui::Id::new("drag-photos")).order(egui::Order::Tooltip).interactable(false).fixed_pos(pos + vec2(14.0, 10.0)).show(ctx, |ui| {
         egui::Frame::NONE.fill(t.accent).corner_radius(10.0).inner_margin(egui::Margin::symmetric(9, 3)).show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(crate::i18n::tr_format!("{n} photo{}", if n == 1 { "" } else { "s" }, n = n))
-                    .color(Color32::WHITE)
-                    .font(t.semibold(12.0)),
-            );
+            let label = ui.add(egui::Label::new(egui::RichText::new(text).color(Color32::WHITE).font(t.semibold(12.0))).extend());
+            crate::widgets::register(ui.ctx(), "dragPhotos", label.rect);
         });
     });
 }

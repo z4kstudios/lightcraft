@@ -46,7 +46,7 @@ Hours are calibrated on this repo's PR history; see
 |---|---:|---:|---:|---|
 | Features | ~61% | ~77% (checklist 81.1%) | 600–1,100 h | [target-app-parity](docs/target-app-parity.md#features) |
 | ↳ RAW cameras, colour, lens profiles | ~60% | 83% of 1,446 Adobe models decode, 38% verified | 255–480 h | [raw-parity](docs/raw-parity.md) |
-| UI/UX fidelity | ~70% | ~85% | 34–58 h | [ui-parity](docs/ui-parity.md) |
+| UI/UX fidelity | ~70% | ~85% | 32–54 h | [ui-parity](docs/ui-parity.md) |
 | File formats (non-raw) | ~70% | ~85% | 30–55 h | [file-format-parity](docs/file-format-parity.md) |
 | Hardware | ~40% | ~50% | 40–80 h | [hardware-parity](docs/hardware-parity.md) |
 | Localization | ~55% of the 12 key languages | 7 of 12 present | 130–210 h (+145–255 h new scripts) | [localization-parity](docs/localization-parity.md) |
@@ -96,7 +96,7 @@ while lower-layer errors stay English. Detail: [localization-parity.md](docs/loc
 | Korean | ko | 0% | none (no Hangul face) |
 | Vietnamese | vi | 0% | none |
 
-Also shipped: Traditional Chinese (87%), Russian (74%), Ukrainian (99%), Italian (92%).
+Also shipped: Traditional Chinese (87%), Russian (74%), Ukrainian (99%), Italian (92%), Georgian (100%).
 
 ## Upcoming
 
@@ -105,7 +105,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 1. Camera colour of our own: measured calibration for the popular models (50–90 h)
 2. CR3 for every Canon body (25–45 h)
 3. Render-fidelity suite against Lightroom, then tuning (30–60 h)
-4. Full-resolution zoom (8–15 h)
+4. ~~Full-resolution zoom~~ (done 2026-10-12)
 5. AI masks: Subject / Sky / People (40–70 h + model decision)
 6. Compressed ORF and HE NEF (28–55 h)
 7. Lens profile database of our own (40–80 h)
@@ -191,6 +191,8 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 | 2026-10-14 | minor | 17 uncompressed Olympus and Samsung models verified on one CC0 file each (254 models verified, 18%); headline numbers unchanged |
 | 2026-10-12 | minor | Mamiya MEF decoded and imported: ZD verified (241); headline numbers unchanged |
 | 2026-10-12 | minor | Epson ERF decoded: 3 more verified models (240); headline numbers unchanged |
+| 2026-10-12 | minor | Georgian (`ka`) interface language added (every catalog message) |
+| 2026-10-14 | minor | Full-resolution zoom (gap 4) closed: soft proofing gets zoom windows; headline numbers unchanged |
 | 2026-10-12 | minor | UI/UX remaining 40–70 h → 34–58 h (accessibility audit landed); headline numbers unchanged |
 | 2026-10-14 | minor | Camera-coverage sweep (#1327): 30 models verified on 40 CC0 files (coverage.py 515 → 545 verified); sensor verification does not establish colour parity (#1277); headline numbers unchanged |
 | 2026-10-12 | minor | 22 more CR3 bodies verified, EOS R6 Mark III white balance: RAW decoding 77% → 83%, RAW ~56% → ~60%; mainstream 49% → 51%, essentials 64% → 65%; full unchanged at ~61% |

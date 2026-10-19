@@ -30,7 +30,10 @@ reference. Auto Align: features on exposure-normalised luminance, RANSAC transla
 homography (the simplest model that explains ≥ 97 % of the matches). Exposure ratios are measured
 (median log ratio of well-exposed pixels between brightness neighbours), EXIF is the fallback.
 Radiance is a weighted mean in linear light, weight `k · (1 − smoothstep(0.8·clip, 0.96·clip, max
-channel))`. Where the reference is at or near its clip the scene is at least that bright, so a frame that reads far
+channel within 1 px))`: a pixel next to clipped photosites was demosaiced from them and reads low in the clipped
+channel, so it goes with them (on real ARW brackets the brightest frame's green was 3–5 % low there, and bright
+windows took a magenta tinge). The frames are taken in brightness order (ties by content), so the result doesn't
+depend on the order they come in. Where the reference is at or near its clip the scene is at least that bright, so a frame that reads far
 darker there (an object moved: a star, the moon, a passing light) is left out and the clipped highlight stays (always
 on: a moving star otherwise left a black hole). Deghost: a per-pixel consistency test on ≤ 2048 px versions against the
 reference radiance (with a noise floor; the reference predicts down to 0.1 % of its clip, so a brighter frame's ghost in

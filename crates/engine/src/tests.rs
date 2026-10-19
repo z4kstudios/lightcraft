@@ -313,6 +313,44 @@ fn permanently_deleting_explicit_targets_keeps_the_surviving_selection() {
     assert_eq!(s.catalog.to_snapshot(), snapshot);
 }
 
+/// `mask.brushStroke {connect: true}` (a ⇧-click) starts from the last point of the mask's last stroke: one straight
+/// stroke when the brush is unchanged, pieces whose size, feather and flow step from the last stroke's to the new
+/// values when it changed, and a plain dab when there is nothing to connect to.
+#[test]
+fn connected_brush_strokes_start_where_the_last_one_ended() {
+    use lightcraft_develop::MaskShape;
+    use lightcraft_geom::Point;
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let r = s.execute("mask.brushStroke", &json!({"points": [[0.2, 0.5]], "size": 0.02, "connect": true})).unwrap();
+    assert_eq!(r["connected"], false, "nothing to connect to: a dab");
+    let strokes = |s: &Session| {
+        let d = s.develop_of(id).unwrap();
+        let MaskShape::Brush { strokes } = &d.masks[0].components[0].shape else { panic!("brush") };
+        strokes.clone()
+    };
+    assert_eq!(strokes(&s)[0].points.len(), 1);
+    let r = s.execute("mask.brushStroke", &json!({"points": [[0.6, 0.5]], "size": 0.02, "connect": true})).unwrap();
+    assert_eq!(r["connected"], true);
+    let line = strokes(&s);
+    assert_eq!(line.len(), 2);
+    assert_eq!(line[1].points, vec![Point::new(0.2, 0.5), Point::new(0.6, 0.5)]);
+    // a bigger, softer brush: the segment tapers from the last stroke's values to the new ones
+    let r = s.execute("mask.brushStroke", &json!({"points": [[0.6, 0.9]], "size": 0.04, "feather": 80, "connect": true})).unwrap();
+    assert_eq!(r["connected"], true);
+    let all = strokes(&s);
+    let taper = &all[2..];
+    assert!(taper.len() > 4, "{} pieces", taper.len());
+    assert_eq!(taper[0].points[0], Point::new(0.6, 0.5), "from the last stroke's end");
+    assert_eq!(*taper.last().unwrap().points.last().unwrap(), Point::new(0.6, 0.9), "to the click");
+    assert!(taper.windows(2).all(|w| w[1].size >= w[0].size && w[1].feather >= w[0].feather && w[0].points[1] == w[1].points[0]));
+    assert!((taper.last().unwrap().size - 0.04).abs() < 1e-12 && (taper.last().unwrap().feather - 80.0).abs() < 1e-9);
+    assert!(taper[0].size > 0.02 && taper[0].size < 0.04);
+    // all of it is one undo step
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(strokes(&s).len(), 2);
+}
+
 #[test]
 fn brush_strokes_keep_pen_pressure_and_refuse_bad_lists() {
     let mut s = demo();
@@ -328,6 +366,35 @@ fn brush_strokes_keep_pen_pressure_and_refuse_bad_lists() {
     assert!(strokes[1].pressure.is_empty(), "a mouse stroke has no pressure data");
     let json = serde_json::to_string(&strokes[1]).unwrap();
     assert!(!json.contains("pressure"), "and stores none: {json}");
+}
+
+/// A ⇧-click line carries pen pressure: the last dab's at its start and the click's at its end, stepping along a
+/// tapered line; with no pressure on either side there is none.
+#[test]
+fn connected_brush_strokes_carry_pen_pressure() {
+    use lightcraft_develop::MaskShape;
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let strokes = |s: &Session| {
+        let d = s.develop_of(id).unwrap();
+        let MaskShape::Brush { strokes } = &d.masks[0].components[0].shape else { panic!("brush") };
+        strokes.clone()
+    };
+    s.execute("mask.brushStroke", &json!({"points": [[0.2, 0.5]], "size": 0.02, "pressure": [0.4]})).unwrap();
+    s.execute("mask.brushStroke", &json!({"points": [[0.6, 0.5]], "size": 0.02, "pressure": [1.0], "connect": true})).unwrap();
+    assert_eq!(strokes(&s)[1].pressure, vec![0.4, 1.0]);
+    s.execute("mask.brushStroke", &json!({"points": [[0.6, 0.9]], "size": 0.04, "pressure": [0.2], "connect": true})).unwrap();
+    let taper = &strokes(&s)[2..];
+    assert!(taper.iter().all(|t| t.pressure.len() == 2));
+    assert!((taper[0].pressure[0] - 1.0).abs() < 1e-6 && (taper.last().unwrap().pressure[1] - 0.2).abs() < 1e-6);
+    assert!(taper.windows(2).all(|w| w[1].pressure[0] <= w[0].pressure[0]));
+    // a mouse: no pressure anywhere
+    let mut m = demo();
+    m.execute("mask.brushStroke", &json!({"points": [[0.2, 0.5]], "size": 0.02})).unwrap();
+    m.execute("mask.brushStroke", &json!({"points": [[0.6, 0.5]], "size": 0.02, "connect": true})).unwrap();
+    let d = m.develop_of(m.active().unwrap()).unwrap();
+    let MaskShape::Brush { strokes } = &d.masks[0].components[0].shape else { panic!("brush") };
+    assert!(strokes[1].pressure.is_empty());
 }
 
 #[test]

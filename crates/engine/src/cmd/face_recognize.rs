@@ -321,6 +321,8 @@ mod imp {
             return Ok(e.clone());
         }
         let embedder = Arc::new(Embedder::load(&dir.join(&id).join("model.onnx"), &installed.manifest).map_err(|e| bad(cmd, e.to_string()))?);
+        let net = embedder.clone();
+        super::super::face_detect::offer_gpu(s, "recognition", move |gpu| net.accelerate(gpu, true).map_err(|e| e.to_string()));
         let dim = match installed.manifest.output {
             lightcraft_faces::OutputSpec::Embedding { dim } => dim as usize,
             _ => return Err(bad(cmd, "the chosen model is not a recognition model")),
@@ -672,6 +674,9 @@ mod imp {
         if let Some(w) = &s.faces.worker {
             w.allow(target, pace);
         }
+        // the GPU is held back the same way: a light pace leaves it mostly free for the window's own renders
+        let (runs, share) = crate::faces_worker::gpu_pace(pace);
+        lightcraft_gpu::faces::set_pace(runs, share);
         while target > 0 && s.faces.in_flight.len() < target + PREFETCH {
             let Some(id) = s.faces.queue.pop() else { break };
             let Some(job) = prepare(s, id, true) else { continue };

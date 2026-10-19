@@ -15,6 +15,8 @@ mod container;
 pub mod cr3;
 mod datetime;
 mod exif;
+pub mod focus;
+mod focus_read;
 mod gpx;
 mod iptc;
 pub mod tags;
@@ -24,6 +26,7 @@ mod xmp_merge;
 pub use container::{Embedded, embedded, jpeg_segments, png_chunks, webp_chunks};
 pub use datetime::DateTime;
 pub use exif::{from_tiff, read_exif, strip_exif_header, try_read_exif, write_exif};
+pub use focus::FocusPoint;
 pub use gpx::{GpxError, Match, TrackPoint, Tracklog, parse_gpx};
 pub use iptc::parse_iptc;
 pub use lightcraft_geom::{Orientation, Rect};
@@ -142,6 +145,9 @@ pub struct Metadata {
     pub label: Option<String>,
     /// Face/pet/focus/barcode regions (`mwg-rs:Regions`), read from XMP only.
     pub regions: Vec<Region>,
+    /// Where the camera focused, from its maker notes ([`focus`]; Sony only for now), on the upright photo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<FocusPoint>,
 }
 
 macro_rules! fill {
@@ -204,6 +210,9 @@ impl Metadata {
         }
         if self.regions.is_empty() {
             self.regions = other.regions.clone();
+        }
+        if self.focus.is_none() {
+            self.focus = other.focus.clone();
         }
     }
 

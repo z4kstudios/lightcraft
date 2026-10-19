@@ -261,6 +261,29 @@ mod in_the_loupe {
         assert!(w >= 1300 && hh >= 700, "it covers the canvas: {w}×{hh}");
     }
 
+    // Given soft proofing on at 1:1 (LR-VIEW-ZOOM), the view is a canvas-sized frame plus a
+    // native window carrying the proof, as without it, instead of a whole-frame render at the
+    // photo's full size; switching the proof off swaps the window back to the plain look
+    #[test]
+    fn soft_proofing_at_one_to_one_is_a_window() {
+        let (mut h, native) = detail();
+        h.request("engine.execute", json!({"command": "view.zoom100"}), T);
+        h.settle(SETTLE);
+        let plain = h.app.region_view.expect("a window render without the proof");
+        let r = h.request("engine.execute", json!({"command": "view.softProof", "params": {"on": true, "destWarning": true}}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        h.settle(SETTLE);
+        assert!(h.app.ui.soft_proof);
+        let main = rendered_long_edge(&h);
+        assert!(main <= 2560 && main < native, "native {native}: the whole-frame render is {main}");
+        let proofed = h.app.region_view.expect("a window render with the proof");
+        assert_eq!(proofed.full.0.max(proofed.full.1), native, "cut from the photo's own pixels");
+        assert_ne!(proofed.settings, plain.settings, "the proof is part of the window's look");
+        h.request("engine.execute", json!({"command": "view.softProof", "params": {"on": false}}), T);
+        h.settle(SETTLE);
+        assert_eq!(h.app.region_view.map(|r| r.settings), Some(plain.settings), "back to the plain window");
+    }
+
     // Given the user capped the preview at 1600 px, then 1:1 is rendered no larger than that
     #[test]
     fn an_explicit_limit_still_caps_one_to_one() {
@@ -646,10 +669,16 @@ mod in_the_loupe {
     #[test]
     #[ignore = "a measurement, not a check"]
     fn profile_slider_drag() {
-        for (size, percent) in
-            [([1400.0, 900.0], 0.0), ([1400.0, 900.0], 100.0), ([1400.0, 900.0], 400.0), ([2800.0, 1700.0], 100.0), ([2800.0, 1700.0], 400.0)]
-        {
+        for (size, percent, proof) in [
+            ([1400.0, 900.0], 0.0, false),
+            ([1400.0, 900.0], 100.0, false),
+            ([1400.0, 900.0], 400.0, false),
+            ([2800.0, 1700.0], 100.0, false),
+            ([2800.0, 1700.0], 400.0, false),
+            ([1400.0, 900.0], 100.0, true),
+        ] {
             let (mut h, native) = detail_in(size);
+            h.app.ui.soft_proof = proof;
             h.app.ui.zoom = if percent == 0.0 { crate::state::Zoom::Fit } else { crate::state::Zoom::Percent(percent) };
             h.settle(SETTLE);
             h.app.session.begin_interaction("Exposure").unwrap();
@@ -673,9 +702,10 @@ mod in_the_loupe {
             ms.sort_by(|a, b| a.total_cmp(b));
             let (w, hh) = region_tile(&h).unwrap_or((0, 0));
             eprintln!(
-                "PROFILE {}x{} canvas, {percent:>4}% (0 = fit) of {native} px: tick→shown median {:.1} ms, p90 {:.1} ms, max {:.1} ms; whole-frame render {} px, window tile {w}×{hh}",
+                "PROFILE {}x{} canvas, {percent:>4}% (0 = fit){} of {native} px: tick→shown median {:.1} ms, p90 {:.1} ms, max {:.1} ms; whole-frame render {} px, window tile {w}×{hh}",
                 size[0],
                 size[1],
+                if proof { ", soft proof" } else { "" },
                 ms[ms.len() / 2],
                 ms[ms.len() * 9 / 10],
                 ms[ms.len() - 1],
@@ -817,18 +847,6 @@ mod in_the_loupe {
         h.request("engine.execute", json!({"command": "view.zoom100"}), T);
         h.settle(SETTLE);
         assert_eq!(h.app.region_tiles.len(), 2, "{:?}", h.app.region_tiles.keys().collect::<Vec<_>>());
-    }
-
-    // Given soft proofing at 1:1 (a mode that draws one image, so no window), the whole-frame
-    // render is as big as the view, not a canvas-sized upscale
-    #[test]
-    fn soft_proofing_at_one_to_one_renders_the_whole_frame_at_full_size() {
-        let (mut h, native) = detail();
-        h.app.ui.soft_proof = true;
-        h.request("engine.execute", json!({"command": "view.zoom100"}), T);
-        h.settle(SETTLE);
-        assert_eq!(h.app.region_view, None);
-        assert_eq!(rendered_long_edge(&h), native);
     }
 
     // Given a window the photo's spots make too big for one render (refused), the loupe falls back

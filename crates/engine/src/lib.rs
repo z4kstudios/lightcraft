@@ -29,6 +29,7 @@ pub mod demo;
 pub mod denoise;
 pub mod devices;
 pub mod display;
+pub mod doc_path;
 mod errors;
 pub mod export;
 pub mod face_download;
@@ -38,6 +39,8 @@ mod faces_index;
 #[cfg(not(target_arch = "wasm32"))]
 mod faces_worker;
 pub mod files;
+#[cfg(not(target_arch = "wasm32"))]
+mod focus_scan;
 pub mod fonts;
 pub mod guard;
 pub mod import;
@@ -54,6 +57,7 @@ pub mod media;
 pub mod memory;
 pub mod merge;
 mod model_download;
+pub mod open_path;
 pub mod originals;
 mod pdf;
 pub mod preset_import;
@@ -252,6 +256,9 @@ pub struct Session {
     /// The loaded recognition model and the face embeddings made with it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) faces: faces_index::FacesState,
+    /// Reading focus points for photos imported before they were read (`photo.readFocusPoints`, `focus.pump`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) focus_scan: focus_scan::FocusScan,
     /// Copied develop settings (partial JSON) for Paste.
     pub clipboard: Option<Value>,
     /// The folder on disk the [`LibrarySource::Folder`] view browses.
@@ -293,6 +300,10 @@ pub struct Session {
     pub xmp: sidecar::XmpPrefs,
     /// Parameters of the last export (`app.export` params, minus targets), persisted in prefs.json.
     pub last_export: Option<serde_json::Value>,
+    /// The options of the last Photo Merge started, per command (`merge.hdr`, `merge.panorama`,
+    /// `merge.hdrPanorama`): the merge dialog opens with them and "… with Last Settings" uses
+    /// them. Persisted in prefs.json.
+    pub last_merge: std::collections::BTreeMap<String, serde_json::Value>,
     /// The user's export presets (built-ins: [`export::builtin_presets`]), persisted in prefs.json.
     pub export_presets: Vec<export::ExportPreset>,
     /// The Print module's current layout, image settings, page, guides and job (`print.*`). Lives
@@ -431,6 +442,8 @@ impl Session {
             face_catalog: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             faces: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            focus_scan: Default::default(),
             clipboard: None,
             meta_clipboard: None,
             browse: None,
@@ -452,6 +465,7 @@ impl Session {
             library_identity: Arc::new(()),
             xmp: sidecar::XmpPrefs::default(),
             last_export: None,
+            last_merge: Default::default(),
             export_presets: Vec::new(),
             print: Default::default(),
             print_templates: Vec::new(),
@@ -1250,6 +1264,8 @@ mod tests_face_recognize;
 mod tests_face_tiles;
 #[cfg(test)]
 mod tests_filesystem_history;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests_focus_scan;
 #[cfg(test)]
 mod tests_folders;
 #[cfg(test)]
@@ -1274,6 +1290,8 @@ mod tests_lightroom_folder;
 mod tests_mask_effects;
 #[cfg(test)]
 mod tests_merge;
+#[cfg(test)]
+mod tests_move_to_share;
 #[cfg(test)]
 mod tests_organize;
 #[cfg(test)]

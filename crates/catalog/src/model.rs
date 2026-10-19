@@ -199,6 +199,11 @@ pub struct Meta {
     /// Left out of the catalog JSON when empty (most photos), so older catalogs read unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<lightcraft_meta::Region>,
+    /// Where the camera focused (read from the file's maker notes at import or Reload from Disk; Sony
+    /// bodies whose files have been checked), on the upright (EXIF-oriented) photo. Read-only: never
+    /// written to XMP. Left out of the catalog JSON when unknown, so older catalogs read unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<lightcraft_meta::FocusPoint>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -638,6 +643,7 @@ mod edited_tests {
             ("NIKON CORPORATION NIKON D850", "NEF", false),
             ("Canon Canon EOS 5D Mark III", "CR2", false),
             ("Canon Canon EOS R6m2", "CR3", false),
+            ("Canon Canon EOS R6 Mark II", "CR3", false),
             ("Canon Canon EOS R7", "CR3", true),
             ("FUJIFILM X-T4", "RAF", false),
             ("ILCE-7M3", "ARW", false),
