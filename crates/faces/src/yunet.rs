@@ -263,7 +263,7 @@ mod tests {
 
     fn detector() -> Option<Detector> {
         let Some(bytes) = model() else {
-            eprintln!("LC_YUNET_MODEL is not set: skipping");
+            lightcraft_testkit::skip!(Model, "LC_YUNET_MODEL is not set");
             return None;
         };
         Some(Detector::new(&bytes).unwrap())

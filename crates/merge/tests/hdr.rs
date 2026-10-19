@@ -161,3 +161,48 @@ fn deghost_removes_a_moving_object() {
     let mean = high.ghost.data.iter().sum::<f32>() / high.ghost.data.len() as f32;
     assert!(mean < 0.08, "the overlay is local (mean {mean})");
 }
+
+/// A dark night sky (≈ 0.3 % of the reference's white) with a soft star of peak `peak` (Gaussian, σ = 3 px) at (cx, cy)
+/// in truth coordinates.
+fn night_with_star(cx: f32, cy: f32, peak: f32) -> Rgb32f {
+    Rgb32f::from_fn(W + 2 * M, H + 2 * M, |x, y| {
+        let sky = 0.003 * (1.0 + 0.3 * (x as f32 / (W + 2 * M) as f32));
+        let d2 = (x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2);
+        [sky + peak * (-d2 / 18.0).exp(); 3]
+    })
+}
+
+/// Night brackets of a star that moves between the frames (the sky turns during a tripod bracket): its core clips in the
+/// reference and in the brighter frame, not in the darkest one.
+fn moving_star_frames(xs: [f32; 3]) -> Vec<Frame> {
+    let ks = [0.0625f32, 1.0, 8.0];
+    (0..3).map(|i| shoot(&night_with_star(xs[i], 210.0 + M as f32, 10.0), ks[i], 0.0, 0.0, 30 + i as u64)).collect()
+}
+
+#[test]
+fn a_clipped_star_of_the_reference_is_not_erased_by_frames_where_it_moved() {
+    let xs = [280.0 + M as f32, 320.0 + M as f32, 360.0 + M as f32];
+    let r = merge_hdr(moving_star_frames(xs), &HdrOptions { align: false, deghost: Deghost::None }, &no_progress).unwrap();
+    assert_eq!(r.reference, 1);
+    // the reference saw the star clipped here, so the scene is at least that bright; the frames where the star had moved
+    // read the dark sky there and must not replace it (which left a black hole in real night brackets)
+    let core = r.radiance.get(320, 210);
+    let m = core[0].max(core[1]).max(core[2]);
+    assert!(m > 0.9, "the reference's clipped star core was erased: {core:?}");
+}
+
+#[test]
+fn deghost_removes_a_bright_frames_ghost_in_a_dark_sky() {
+    let xs = [280.0 + M as f32, 320.0 + M as f32, 360.0 + M as f32];
+    let r = merge_hdr(moving_star_frames(xs), &HdrOptions { align: false, deghost: Deghost::High }, &no_progress).unwrap();
+    // where only the brightest frame had the star, the sky is what the reference saw: no ring of its unclipped halo
+    let mut worst = 0f32;
+    for y in 196..224 {
+        for x in 346..374 {
+            let p = r.radiance.get(x, y);
+            worst = worst.max(p[1]);
+        }
+    }
+    assert!(worst < 0.02, "the brightest frame's star is left as a ghost (peak {worst})");
+    assert!(r.ghost.get(360, 210) > 0.5, "the overlay marks the ghost");
+}

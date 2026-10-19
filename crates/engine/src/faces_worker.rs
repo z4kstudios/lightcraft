@@ -134,6 +134,9 @@ pub(crate) struct Prepared {
     /// The session's face epoch when this was prepared: another library has been opened since if it differs.
     pub epoch: u64,
     pub id: PhotoId,
+    /// The photo's content key ([`crate::media::content_key`]) when this was prepared: its file was replaced (Reload
+    /// after an outside edit) since if it differs.
+    pub content: String,
     pub job: RenderJob,
     /// A raw's embedded preview, tried before the render job (much faster than decoding the raw).
     pub preview: Option<(String, PreviewLoader)>,
@@ -150,6 +153,7 @@ pub(crate) struct Done {
     pub tag: String,
     pub epoch: u64,
     pub id: PhotoId,
+    pub content: String,
     /// Each face's region, its embedding (`None` when it could not be made) and the box to show it by.
     pub results: Vec<(Rect, Option<Vec<f32>>, Rect)>,
     /// Faces were to be looked for in this photo.
@@ -177,7 +181,7 @@ fn face_rect(f: &Face) -> Option<Rect> {
 
 /// Do the work for one photo. Never panics: whatever goes wrong, its faces come back as `None`.
 pub(crate) fn process(p: Prepared, embedder: &Embedder) -> Done {
-    let Prepared { tag, epoch, id, job, preview, todo, detect, detector } = p;
+    let Prepared { tag, epoch, id, content, job, preview, todo, detect, detector } = p;
     let fallback = |todo: Vec<Rect>| todo.into_iter().map(|r| (r, None, r)).collect::<Vec<_>>();
     let rects = todo.clone();
     let run = catch_unwind(AssertUnwindSafe(|| {
@@ -238,7 +242,7 @@ pub(crate) fn process(p: Prepared, embedder: &Embedder) -> Done {
         (results, new_faces)
     }));
     let (results, found) = run.unwrap_or_else(|_| (fallback(rects), None));
-    Done { tag, epoch, id, results, detect_wanted: detect, found }
+    Done { tag, epoch, id, content, results, detect_wanted: detect, found }
 }
 
 type Job = (Arc<Embedder>, Prepared);

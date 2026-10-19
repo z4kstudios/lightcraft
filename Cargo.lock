@@ -3081,6 +3081,7 @@ dependencies = [
  "lightcraft-engine",
  "lightcraft-raster",
  "lightcraft-sysmem",
+ "lightcraft-testkit",
  "lightcraft-ui-egui",
  "log",
  "muda",
@@ -3155,6 +3156,7 @@ dependencies = [
  "lightcraft-geom",
  "lightcraft-heif",
  "lightcraft-raster",
+ "lightcraft-testkit",
  "moxcms 0.9.1",
  "png",
  "proptest",
@@ -3251,6 +3253,8 @@ dependencies = [
  "lightcraft-raw",
  "lightcraft-scenes",
  "lightcraft-segment",
+ "lightcraft-slideshow",
+ "lightcraft-testkit",
  "lightcraft-tiff",
  "log",
  "miniz_oxide 0.8.9",
@@ -3266,6 +3270,7 @@ dependencies = [
 name = "lightcraft-faces"
 version = "0.8.0"
 dependencies = [
+ "lightcraft-testkit",
  "matrixmultiply",
  "ndarray",
  "proptest",
@@ -3316,6 +3321,7 @@ dependencies = [
  "lightcraft-raster",
  "lightcraft-raw",
  "lightcraft-scenes",
+ "lightcraft-testkit",
  "log",
  "pollster 1.0.1",
  "wgpu",
@@ -3430,12 +3436,14 @@ dependencies = [
 name = "lightcraft-raw"
 version = "0.8.0"
 dependencies = [
+ "dhat",
  "jpeg-encoder",
  "jxl-oxide",
  "lightcraft-color",
  "lightcraft-geom",
  "lightcraft-meta",
  "lightcraft-raster",
+ "lightcraft-testkit",
  "lightcraft-tiff",
  "miniz_oxide 0.8.9",
  "proptest",
@@ -3466,6 +3474,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "lightcraft-fetch",
+ "lightcraft-testkit",
  "log",
  "serde",
  "serde_json",
@@ -3473,7 +3482,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightcraft-slideshow"
+version = "0.8.0"
+dependencies = [
+ "lightcraft-raster",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lightcraft-sysmem"
+version = "0.8.0"
+
+[[package]]
+name = "lightcraft-testkit"
 version = "0.8.0"
 
 [[package]]
@@ -3505,6 +3527,8 @@ dependencies = [
  "lightcraft-pipeline",
  "lightcraft-preview",
  "lightcraft-raster",
+ "lightcraft-slideshow",
+ "lightcraft-testkit",
  "log",
  "serde",
  "serde_json",

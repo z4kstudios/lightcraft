@@ -245,12 +245,12 @@ pub fn settings_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let can = app.services.pick_model_file.is_some();
-        let r = ui.add_enabled(can, egui::Button::new("Add a model file…"));
+        let r = ui.add_enabled(can, egui::Button::new(crate::i18n::tr("Add a model file…")));
         register(ui.ctx(), "faces:addModel", r.rect);
         if r.clicked() {
             let _ = app.run("dialog.faceModel", json!({}));
         }
-        ui.label(RichText::new("or drop a .onnx file on the window").color(t.text_dim));
+        ui.label(RichText::new(crate::i18n::tr("or drop a .onnx file on the window")).color(t.text_dim));
     });
     // what is wrong with the user's own catalog (catalog.json in the models folder), if anything
     for e in list["catalog"]["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).take(3) {
@@ -293,9 +293,9 @@ fn model_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, m: &Value, 
                         ui.label(RichText::new(size).color(t.text_dim));
                     }
                     if selected {
-                        ui.label(RichText::new("in use").color(t.accent));
+                        ui.label(RichText::new(crate::i18n::tr("in use")).color(t.accent));
                     } else if installed {
-                        ui.label(RichText::new("installed").color(t.text_dim));
+                        ui.label(RichText::new(crate::i18n::tr("installed")).color(t.text_dim));
                     }
                 });
                 ui.label(RichText::new(licence_line(m)).font(t.font(11.5)).color(if m["licence"]["commercial"] == "yes" {
@@ -329,7 +329,7 @@ fn model_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, m: &Value, 
                         register(ui.ctx(), format!("faces:progress:{id}"), bar.rect);
                     }
                     (Some("done"), _) => {
-                        ui.label(RichText::new("Downloaded and checked. Installing…").font(t.font(11.5)).color(t.text_dim));
+                        ui.label(RichText::new(crate::i18n::tr("Downloaded and checked. Installing…")).font(t.font(11.5)).color(t.text_dim));
                     }
                     (Some("failed"), Some(d)) => {
                         let why = sentence(d["error"].as_str().unwrap_or("The download failed"));
@@ -340,7 +340,7 @@ fn model_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, m: &Value, 
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if installed {
-                    let r = ui.button("Remove");
+                    let r = ui.button(crate::i18n::tr("Remove"));
                     register(ui.ctx(), format!("faces:remove:{id}"), r.rect);
                     if r.clicked() {
                         let _ = app.run("faces.models.remove", json!({"id": id}));
@@ -357,7 +357,7 @@ fn model_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, m: &Value, 
                 } else {
                     match dl_state {
                         Some("running") => {
-                            let r = ui.button("Cancel");
+                            let r = ui.button(crate::i18n::tr("Cancel"));
                             register(ui.ctx(), format!("faces:cancelDownload:{id}"), r.rect);
                             if r.clicked() {
                                 let _ = app.run("faces.models.downloadCancel", json!({"id": id}));
@@ -368,9 +368,9 @@ fn model_row(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, m: &Value, 
                         Some("done") => {}
                         _ => {
                             if let Some(url) = m["source"].as_str() {
-                                let r = ui
-                                    .button("Open page")
-                                    .on_hover_text("Opens the model's own page in your browser, to read about it or get the file yourself.");
+                                let r = ui.button(crate::i18n::tr("Open page")).on_hover_text(crate::i18n::tr(
+                                    "Opens the model's own page in your browser, to read about it or get the file yourself.",
+                                ));
                                 register(ui.ctx(), format!("faces:get:{id}"), r.rect);
                                 if r.clicked() {
                                     open_page(app, url);
@@ -403,7 +403,7 @@ pub fn model_dialog(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, info
     let kind = info["kind"].as_str().unwrap_or("unsupported");
     let file = info["fileName"].as_str().unwrap_or("");
     if kind == "unsupported" {
-        ui.label(RichText::new("This file cannot be used yet").font(t.semibold(13.5)).color(t.caution));
+        ui.label(RichText::new(crate::i18n::tr("This file cannot be used yet")).font(t.semibold(13.5)).color(t.caution));
         ui.add(
             egui::Label::new(
                 RichText::new(sentence(info["reason"].as_str().unwrap_or("It is not a face recognition model LightCraft understands")))
@@ -420,7 +420,7 @@ pub fn model_dialog(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, info
         ui.label(RichText::new(mb(info["sizeBytes"].as_u64())).color(t.text_dim));
     });
     if info["alreadyInstalled"] == true {
-        ui.label(RichText::new("Already installed. Installing again is harmless.").color(t.text_dim));
+        ui.label(RichText::new(crate::i18n::tr("Already installed. Installing again is harmless.")).color(t.text_dim));
     }
     let download = info["download"].is_string();
     let detector = m["role"] == "detector";
@@ -445,11 +445,13 @@ pub fn model_dialog(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens, info
     }
     let provenance = m["provenance"].as_str().unwrap_or("");
     if !provenance.is_empty() {
-        ui.add(egui::Label::new(RichText::new(format!("Trained on: {provenance}")).color(t.text_dim)).wrap());
+        ui.add(
+            egui::Label::new(RichText::new(crate::i18n::tr_format!("Trained on: {provenance}", provenance = provenance)).color(t.text_dim)).wrap(),
+        );
     }
     if kind == "draft" {
         ui.add_space(2.0);
-        ui.label(RichText::new("LightCraft does not know this model, so it assumed:").color(t.text_label));
+        ui.label(RichText::new(crate::i18n::tr("LightCraft does not know this model, so it assumed:")).color(t.text_label));
         for a in info["assumptions"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             ui.add(egui::Label::new(RichText::new(format!("•  {a}")).font(t.font(12.0)).color(t.text_dim)).wrap());
         }
@@ -640,7 +642,7 @@ pub fn name_editor(
                     outcome = Editor::Setup;
                 }
             }
-            ui.label(RichText::new("Enter to confirm, Esc to cancel").font(t.font(11.0)).color(t.text_dim));
+            ui.label(RichText::new(crate::i18n::tr("Enter to confirm, Esc to cancel")).font(t.font(11.0)).color(t.text_dim));
         });
     });
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

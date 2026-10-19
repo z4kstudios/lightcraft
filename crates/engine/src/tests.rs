@@ -314,6 +314,23 @@ fn permanently_deleting_explicit_targets_keeps_the_surviving_selection() {
 }
 
 #[test]
+fn brush_strokes_keep_pen_pressure_and_refuse_bad_lists() {
+    let mut s = demo();
+    s.execute("mask.add", &json!({"kind": "brush"})).unwrap();
+    s.execute("mask.brushStroke", &json!({"points": [[0.2, 0.2], [0.3, 0.3]], "pressure": [0.25, 7.0]})).unwrap();
+    let lightcraft_develop::MaskShape::Brush { strokes } = &active_dev(&s).masks[0].components[0].shape else { panic!("a brush") };
+    assert_eq!(strokes[0].pressure, vec![0.25, 1.0], "kept, clamped to 0..1");
+    for bad in [json!([0.5, 0.5, 0.5]), json!("hard"), json!([0.5, "x"])] {
+        assert!(s.execute("mask.brushStroke", &json!({"points": [[0.2, 0.2], [0.3, 0.3]], "pressure": bad})).is_err(), "{bad}");
+    }
+    s.execute("mask.brushStroke", &json!({"points": [[0.4, 0.4]]})).unwrap();
+    let lightcraft_develop::MaskShape::Brush { strokes } = &active_dev(&s).masks[0].components[0].shape else { panic!("a brush") };
+    assert!(strokes[1].pressure.is_empty(), "a mouse stroke has no pressure data");
+    let json = serde_json::to_string(&strokes[1]).unwrap();
+    assert!(!json.contains("pressure"), "and stores none: {json}");
+}
+
+#[test]
 fn masks_crop_and_render() {
     let mut s = demo();
     s.execute("mask.add", &json!({"kind": "radial", "center": [0.5, 0.5]})).unwrap();
@@ -454,6 +471,32 @@ fn degenerate_crops_render_with_spots_and_masks() {
         let r = s.render_now(id, 700, 450).unwrap();
         assert!(r.image.width >= 1 && r.image.height >= 1, "{rect:?}");
         assert!(t.elapsed().as_secs_f64() < 60.0, "{rect:?}: {:?}", t.elapsed());
+    }
+}
+
+/// `crop.rotateAspect` on a crop of no size took its aspect from 0/0 = NaN and stored a NaN crop
+/// rectangle; it now falls back to the image's own aspect, a finite crop inside the image.
+#[test]
+fn rotate_aspect_of_degenerate_crop_stays_finite() {
+    for rect in [[0.5, 0.5, 0.5, 0.5], [0.2, 0.2, 0.2, 0.8], [0.2, 0.2, 0.8, 0.2]] {
+        let mut s = demo();
+        s.execute("crop.set", &json!({"rect": rect})).unwrap();
+        s.execute("crop.rotateAspect", &json!({})).unwrap();
+        let r = active_dev(&s).crop.geometry.rect;
+        assert!([r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()), "{rect:?}: {r:?}");
+        assert!(r.width() > 0.0 && r.height() > 0.0, "{rect:?}: {r:?}");
+        assert!(r.x0 >= 0.0 && r.y0 >= 0.0 && r.x1 <= 1.0 && r.y1 <= 1.0, "{rect:?}: {r:?}");
+    }
+}
+
+/// `crop.set` with a huge rect shrank it by a scale of 0 (`inf * 0`) and stored a NaN crop.
+#[test]
+fn crop_set_huge_rect_stays_finite() {
+    for rect in [[0.0, 0.0, 1e308, 1e308], [-1e308, -1e308, 1e308, 1e308]] {
+        let mut s = demo();
+        let _ = s.execute("crop.set", &json!({"rect": rect}));
+        let r = active_dev(&s).crop.geometry.rect;
+        assert!([r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite() && (-1e-6..=1.0 + 1e-6).contains(v)), "{rect:?}: {r:?}");
     }
 }
 
@@ -1518,4 +1561,57 @@ fn oversized_spots_render() {
             assert!(t.elapsed().as_secs_f64() < 60.0, "{size} {mode:?}: {:?}", t.elapsed());
         }
     }
+}
+
+/// Rotate turns the crop with the image: a crop of the left half becomes the top half, and turning back restores it.
+#[test]
+fn rotate_carries_the_crop_with_the_image() {
+    use lightcraft_geom::Rect;
+    let mut s = demo();
+    let id = s.active().unwrap();
+    let mut d = active_dev(&s);
+    let left_half = Rect { x0: 0.0, y0: 0.0, x1: 0.5, y1: 1.0 };
+    d.crop.geometry.rect = left_half;
+    d.crop.aspect = Some((2, 3));
+    s.set_develop(id, d, "Crop").unwrap();
+    s.execute("photo.rotateRight", &json!({})).unwrap();
+    let c = active_dev(&s).crop;
+    assert_eq!(c.geometry.rect, Rect { x0: 0.0, y0: 0.0, x1: 1.0, y1: 0.5 });
+    assert_eq!(c.aspect, Some((3, 2)), "a locked aspect turns too");
+    s.execute("photo.rotateLeft", &json!({})).unwrap();
+    let c = active_dev(&s).crop;
+    assert_eq!(c.geometry.rect, left_half);
+    assert_eq!(c.aspect, Some((2, 3)));
+}
+
+/// A call that names its photos with a malformed `id` or `ids` (a string, a mixed list) is refused and changes
+/// nothing; it used to act on the selection, or on the valid part of the list (issue #1506). Leaving the targets
+/// out still means the selection.
+#[test]
+fn malformed_photo_targets_are_refused_not_widened() {
+    use lightcraft_catalog::PhotoId;
+    let mut s = Session::with_demo();
+    let ids: Vec<u64> = s.catalog.photos().take(3).map(|p| p.id.0).collect();
+    s.execute("library.select", &json!({"ids": [ids[0], ids[1]]})).unwrap();
+    let rating = |s: &Session, i: u64| s.catalog.photo(PhotoId(i)).unwrap().rating;
+    let before: Vec<u8> = ids.iter().map(|i| rating(&s, *i)).collect();
+    for bad in [
+        json!({"rating": 5, "id": "5"}),
+        json!({"rating": 5, "ids": [ids[2], "x"]}),
+        json!({"rating": 5, "ids": ids[2].to_string()}),
+        json!({"rating": 5, "id": -1}),
+    ] {
+        let err = s.execute("photo.rate", &bad).unwrap_err();
+        assert!(matches!(&err, crate::EngineError::BadParams { cmd, .. } if cmd == "photo.rate"), "{bad}: {err}");
+        assert_eq!(ids.iter().map(|i| rating(&s, *i)).collect::<Vec<_>>(), before, "{bad} changed a rating");
+    }
+    let snapshot = s.catalog.to_snapshot();
+    assert!(s.execute("photo.deletePermanently", &json!({"id": "5"})).is_err());
+    assert_eq!(s.catalog.to_snapshot(), snapshot, "nothing deleted");
+    // no targets, or a null one: the selection
+    s.execute("photo.rate", &json!({"rating": 4, "id": null})).unwrap();
+    assert_eq!((rating(&s, ids[0]), rating(&s, ids[1]), rating(&s, ids[2])), (4, 4, before[2]));
+    // a preset's id is not a photo target
+    let preset = s.presets.first().unwrap().id.clone();
+    s.execute("preset.apply", &json!({"id": preset})).unwrap();
 }

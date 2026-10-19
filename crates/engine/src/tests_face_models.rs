@@ -179,7 +179,7 @@ fn hostile_ids_unsupported_models_and_odd_folders_are_handled() {
 /// Settings > Faces downloads; nothing is committed). Without it those tests say so and pass.
 fn demo_with_yunet() -> Option<Session> {
     let Some(file) = std::env::var_os("LC_YUNET_MODEL") else {
-        eprintln!("LC_YUNET_MODEL is not set: skipping");
+        lightcraft_testkit::skip!(Model, "LC_YUNET_MODEL is not set");
         return None;
     };
     let dir = temp("yunet");

@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 
 type Row = BTreeMap<String, Value>;
 const COMMAND: &str = "library.importLightroom";
-const MAX_FILE: u64 = 1 << 30;
+/// Largest catalog database or WAL read into memory (4 GiB). The whole file is held in RAM, so the cap stays finite.
+const MAX_FILE: u64 = 1 << 32;
 
 fn error(why: impl Into<String>) -> crate::EngineError {
     crate::EngineError::BadParams { cmd: COMMAND.into(), msg: why.into() }
@@ -234,10 +235,14 @@ pub(crate) fn validate_for_job(data: &CatalogImport) -> Result<(), String> {
 fn bytes(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if f.metadata().map_err(|e| e.to_string())?.len() > MAX_FILE {
-        return Err("catalog or WAL exceeds 1 GiB import limit".into());
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    if len > MAX_FILE {
+        return Err("catalog or WAL exceeds 4 GiB import limit".into());
     }
     let mut out = Vec::new();
+    // Reserve the exact size up front: growing by doubling would briefly need about twice the catalog's size.
+    let wanted = usize::try_from(len).map_err(|_| "catalog is too large for this platform".to_string())?;
+    out.try_reserve_exact(wanted).map_err(|_| "not enough memory to read the catalog".to_string())?;
     f.take(MAX_FILE + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
     if out.len() as u64 > MAX_FILE {
         return Err("catalog grew beyond import limit".into());

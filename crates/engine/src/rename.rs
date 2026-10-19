@@ -245,6 +245,19 @@ pub fn expand(template: &str, p: &Photo, seq: usize) -> String {
 /// The template's tokens replaced for `p` (no extension added, nothing sanitized). A bare `{seq}`
 /// is zero-padded to `seq_width` digits.
 pub fn expand_tokens(template: &str, p: &Photo, seq: usize, seq_width: usize) -> String {
+    expand_tokens_with(template, p, seq, seq_width, &|_, _, _| None)
+}
+
+/// [`expand_tokens`] with more tokens: `extra(name, arg, tag)` (the name lower-cased, the text
+/// after `:`, the whole tag without braces) answers a token first; `None` leaves it to the rename
+/// tokens (and an unknown one stays as typed). Slideshow text overlays add their tokens this way.
+pub fn expand_tokens_with(
+    template: &str,
+    p: &Photo,
+    seq: usize,
+    seq_width: usize,
+    extra: &dyn Fn(&str, Option<&str>, &str) -> Option<String>,
+) -> String {
     let (stem, ext) = split_ext(&p.file_name);
     let mut out = String::new();
     let mut rest = template;
@@ -257,31 +270,35 @@ pub fn expand_tokens(template: &str, p: &Photo, seq: usize, seq_width: usize) ->
         };
         let tok = &rest[i + 1..i + j];
         let (name, arg) = tok.split_once(':').map(|(a, b)| (a, Some(b))).unwrap_or((tok, None));
-        let v = match name.trim().to_ascii_lowercase().as_str() {
-            "name" | "filename" => stem.to_string(),
-            "num" => {
-                let digits = stem.chars().rev().take_while(char::is_ascii_digit).count();
-                stem[stem.len() - digits..].to_string()
-            }
-            "seq" | "n" => {
-                let w: usize = arg.and_then(|a| a.parse().ok()).unwrap_or(seq_width).min(9);
-                format!("{seq:0w$}")
-            }
-            "date" => format_date(p.date(), arg.unwrap_or("%Y%m%d")),
-            "folder" => match &p.source {
-                Source::File { path } => {
-                    Path::new(path).parent().and_then(Path::file_name).map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+        let lower = name.trim().to_ascii_lowercase();
+        let v = match extra(&lower, arg, tok) {
+            Some(v) => v,
+            None => match lower.as_str() {
+                "name" | "filename" => stem.to_string(),
+                "num" => {
+                    let digits = stem.chars().rev().take_while(char::is_ascii_digit).count();
+                    stem[stem.len() - digits..].to_string()
                 }
-                Source::Demo { .. } => String::new(),
+                "seq" | "n" => {
+                    let w: usize = arg.and_then(|a| a.parse().ok()).unwrap_or(seq_width).min(9);
+                    format!("{seq:0w$}")
+                }
+                "date" => format_date(p.date(), arg.unwrap_or("%Y%m%d")),
+                "folder" => match &p.source {
+                    Source::File { path } => {
+                        Path::new(path).parent().and_then(Path::file_name).map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+                    }
+                    Source::Demo { .. } => String::new(),
+                },
+                "camera" => p.meta.camera.clone(),
+                "lens" => p.meta.lens.clone(),
+                "iso" => p.meta.iso.map(|v| v.to_string()).unwrap_or_default(),
+                "rating" => p.rating.to_string(),
+                "title" => p.meta.title.clone(),
+                "creator" => p.meta.creator.clone(),
+                "ext" => ext.to_string(),
+                _ => format!("{{{tok}}}"),
             },
-            "camera" => p.meta.camera.clone(),
-            "lens" => p.meta.lens.clone(),
-            "iso" => p.meta.iso.map(|v| v.to_string()).unwrap_or_default(),
-            "rating" => p.rating.to_string(),
-            "title" => p.meta.title.clone(),
-            "creator" => p.meta.creator.clone(),
-            "ext" => ext.to_string(),
-            _ => format!("{{{tok}}}"),
         };
         out.push_str(&v);
         rest = &rest[i + j + 1..];

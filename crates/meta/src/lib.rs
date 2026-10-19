@@ -283,6 +283,18 @@ pub fn extract(bytes: &[u8]) -> Metadata {
     m
 }
 
+/// A lens name from its focal and aperture range (Exif LensSpecification, or a Nikon maker note's Lens), written the
+/// way Lightroom shows a lens it has no name for: `50.0 mm f/1.8`, `18.0-135.0 mm f/3.5-5.6`.
+pub fn lens_spec_name(spec: [f64; 4]) -> Option<String> {
+    let [short, long, wide, narrow] = spec;
+    if ![short, long, wide, narrow].iter().all(|v| v.is_finite() && *v > 0.0) || long < short {
+        return None;
+    }
+    let focal = if (long - short).abs() < 0.05 { format!("{short:.1}") } else { format!("{short:.1}-{long:.1}") };
+    let aperture = if (narrow - wide).abs() < 0.05 { format!("{wide:.1}") } else { format!("{wide:.1}-{narrow:.1}") };
+    Some(format!("{focal} mm f/{aperture}"))
+}
+
 /// Lenient number parsing used by XMP/IPTC: `"28/10"`, `"2.8"`, `"+0.7"`.
 pub(crate) fn parse_number(s: &str) -> Option<f64> {
     let s = s.trim();
@@ -296,6 +308,17 @@ pub(crate) fn parse_number(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lens_names_from_a_spec_read_like_lightroom() {
+        assert_eq!(lens_spec_name([50.0, 50.0, 1.8, 1.8]).as_deref(), Some("50.0 mm f/1.8"));
+        assert_eq!(lens_spec_name([18.0, 135.0, 3.5, 5.6]).as_deref(), Some("18.0-135.0 mm f/3.5-5.6"));
+        assert_eq!(lens_spec_name([24.0, 70.0, 2.8, 2.8]).as_deref(), Some("24.0-70.0 mm f/2.8"));
+        assert_eq!(lens_spec_name([70.0, 210.0, 4.0, 5.6]).as_deref(), Some("70.0-210.0 mm f/4.0-5.6"));
+        assert_eq!(lens_spec_name([0.0, 0.0, 0.0, 0.0]), None);
+        assert_eq!(lens_spec_name([200.0, 80.0, 2.8, 2.8]), None);
+        assert_eq!(lens_spec_name([f64::NAN, 50.0, 1.8, 1.8]), None);
+    }
 
     #[test]
     fn numbers() {

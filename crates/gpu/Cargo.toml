@@ -29,5 +29,7 @@ default = []
 denoise = ["dep:lightcraft-denoise", "lightcraft-denoise/runtime"]
 
 [dev-dependencies]
+# tests record why they skip (`cargo xtask ci` lists the skips)
+lightcraft-testkit = { workspace = true }
 lightcraft-scenes = { workspace = true }
 lightcraft-raw = { workspace = true }

@@ -268,6 +268,13 @@ To name a group: click faces to select them (Shift-click selects a range, **Sele
 name in the bar that appears (people already named complete as you type), press Enter: all of them are named at once, as
 one undo step. Selecting names nothing.
 
+Right-click a person's card, or use **Rename Person…** on their page, to rename every face of that person in the library
+at once (`faces.renamePerson`). The name is matched the way the cards are grouped (trimmed, ignoring capitalization) and
+every matching face is stored with the exact new spelling, so a change of capitalization alone updates them all. The
+dialog says how many faces that is. If the new name is already someone else, it refuses until **Combine with the existing
+person** is ticked; that makes one person, and Undo separates them again. Cancelling changes nothing. A person filter,
+the open person page and the way back to it follow the new name. Nothing is written back to the files.
+
 The thumbnail-size slider in the bottom bar sizes the faces here too, with limits of their own. Every face is shown by the
 same kind of box: the detector's own box once the scan has looked at it (kept beside its embedding), so a loosely drawn box
 from another tool does not make one face look farther away than the next; before the scan has looked at a face it is shown
@@ -278,6 +285,11 @@ by its own box.
 In **People**, a click on a person opens their page: **only cropped faces**, never whole photos. First the faces named
 with their name (a click opens that photo), then **More**: the unnamed faces that look like them, most alike first. Click one
 to confirm it (that names the face, as one undo step, and it moves up into their faces), or × to hide it for this session.
+The `↑` control at the top left of a suggested face confirms that face and every currently shown, non-hidden suggestion
+with an equal or higher similarity score. Its tooltip names the person and shows the number of faces before you act.
+Hover a suggestion or focus it with the keyboard and press `A` for the same action. The batch is one undo step;
+suggestions below that score, previously confirmed faces and hidden suggestions stay as they were. Nothing is named
+without this explicit action.
 **Show photos** puts their photos in the grid; **‹ People** or Escape goes back. "More" only holds faces the scan has
 already embedded, so it fills in as the scan goes; it shows faces scoring above four fifths of the model's suggestion bar,
 since you look at each one before anything is named.
@@ -327,7 +339,7 @@ reuses the pictures of its step instead of rendering every face again.
 
 All of this is reachable from the control channel, the CLI and MCP: `faces.models.list`, `faces.models.inspect {path}`,
 `faces.models.install {path, acknowledged: true, activate?}`, `faces.models.download {id, acknowledged: true}` (then `faces.models.downloads`, which also installs what has arrived, and `faces.models.downloadCancel {id}`), `faces.models.remove {id}`, `faces.models.select {id}`,
-`faces.enable {enabled?}`, `faces.detect {ids?, apply?}`, `faces.index {budgetMs?, ids?}`, `faces.pump` (what the app calls every frame), `faces.suggest {ids?, threshold?, margin?}`, `faces.person {name, more?}` (a person's faces and the unnamed faces that look like them), `faces.unnamed {limit?}` (every unnamed face, look-alikes together, with suggested names), `faces.setName {id?, index, name}`, `faces.nameFaces {faces: [{photo, index}], name}` (name many at once, one undo step) and `faces.evaluate`. `acknowledged` must be `true`: the caller has shown the user the terms and the user agreed. Installing makes the model the one in use and switches recognition on unless `activate` is `false`.
+`faces.enable {enabled?}`, `faces.detect {ids?, apply?}`, `faces.index {budgetMs?, ids?}`, `faces.pump` (what the app calls every frame), `faces.suggest {ids?, threshold?, margin?}`, `faces.person {name, more?}` (a person's faces and the unnamed faces that look like them), `faces.unnamed {limit?}` (every unnamed face, look-alikes together, with suggested names), `faces.setName {id?, index, name}`, `faces.nameFaces {faces: [{photo, index}], name}` (name many at once, one undo step), `faces.renamePerson {from, to, merge?}` (rename every in-library face of one person, or merge two when `merge` is true, one undo step) and `faces.evaluate`. `acknowledged` must be `true`: the caller has shown the user the terms and the user agreed. Installing makes the model the one in use and switches recognition on unless `activate` is `false`.
 
 ## Find Blemishes
 
