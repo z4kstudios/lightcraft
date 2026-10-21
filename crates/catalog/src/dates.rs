@@ -2,6 +2,7 @@
 //! weekday and month names, shifting a time by an offset, and grouping a photo list into runs of
 //! the same day / month / year (the date headers of the photo grid).
 
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 
 pub use crate::stacks::iso_seconds;
@@ -11,32 +12,32 @@ pub const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "
 pub const MONTHS: [&str; 12] =
     ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/// Unix seconds → `YYYY-MM-DDTHH:MM:SS` (proleptic Gregorian; H. Hinnant's algorithm).
+/// Unix seconds → `YYYY-MM-DDTHH:MM:SS` (UTC, proleptic Gregorian). A time outside chrono's year
+/// range still converts: the calendar repeats every 400 years, so the instant is moved into range
+/// by whole cycles and only the year is carried (matching the old `civil_from_days`), rather than
+/// resetting to the epoch. The callers here stay well inside years 0000–9999.
 pub fn civil(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
-}
-
-/// Days since 1970-01-01 → (year, month 1..=12, day 1..=31).
-pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
+    let (days, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (cycles, rest) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    // `rest + 719_163` (1970-01-01 is CE day 719_163) is always a valid CE day, and `sod` < 86_400.
+    let date = i32::try_from(rest + 719_163).ok().and_then(chrono::NaiveDate::from_num_days_from_ce_opt);
+    let time = u32::try_from(sod).ok().and_then(|s| chrono::NaiveTime::from_num_seconds_from_midnight_opt(s, 0));
+    match (date, time) {
+        (Some(d), Some(t)) => {
+            let y = i128::from(d.year()) + i128::from(cycles) * 400;
+            let y = i64::try_from(y).unwrap_or(if y < 0 { i64::MIN } else { i64::MAX });
+            // `{:04}` rather than `%Y`, which writes a `+` before years past 9999 (the old `{y:04}` did not).
+            format!("{y:04}-{}", d.and_time(t).format("%m-%dT%H:%M:%S"))
+        }
+        _ => "1970-01-01T00:00:00".to_string(), // unreachable
+    }
 }
 
 /// Weekday name of an ISO date (`None` if it doesn't parse).
 pub fn weekday(iso: &str) -> Option<&'static str> {
     let days = iso_seconds(iso.get(..10)?)?.div_euclid(86_400);
-    // 1970-01-01 was a Thursday
-    Some(WEEKDAYS[(days + 3).rem_euclid(7) as usize])
+    let date = chrono::NaiveDate::from_num_days_from_ce_opt(i32::try_from(days.checked_add(719_163)?).ok()?)?;
+    Some(WEEKDAYS[date.weekday().num_days_from_monday() as usize])
 }
 
 /// Shift an ISO time by `secs`, keeping anything after the seconds (fractions, zone) as it was.
@@ -199,6 +200,14 @@ mod tests {
     fn calendar() {
         assert_eq!(civil(0), "1970-01-01T00:00:00");
         assert_eq!(civil(951_782_400), "2000-02-29T00:00:00");
+        // A year past 9999 keeps the plain zero-padded year (no `+`), as the old `{y:04}` did.
+        assert_eq!(civil(253_402_300_800), "10000-01-01T00:00:00");
+        // Beyond chrono's year range the old `civil_from_days` still converted; pin that output
+        // (never the epoch) in both directions and at the i64 extremes.
+        assert_eq!(civil(10_000_000_000_000), "318857-05-20T17:46:40");
+        assert_eq!(civil(-10_000_000_000_000), "-314918-08-13T06:13:20");
+        assert_eq!(civil(i64::MAX), "292277026596-12-04T15:30:07");
+        assert_eq!(civil(i64::MIN), "-292277022657-01-27T08:29:52");
         assert_eq!(weekday("2026-09-30"), Some("Wednesday"));
         assert_eq!(weekday("2026-10-01T09:00:00"), Some("Thursday"));
         assert_eq!(weekday("2000-02-29"), Some("Tuesday"));
