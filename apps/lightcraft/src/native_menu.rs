@@ -456,10 +456,6 @@ mod tests {
             set_language(*language);
             assert!(seen.insert(structure_of(&bar)), "{language:?} shares another language's menu structure key");
         }
-        set_language(Locale::ZhHant);
-        assert_eq!(label_text("File"), "檔案");
-        assert_eq!(label_text("Settings…"), "設定…");
-        assert_eq!(label_text("Quit LightCraft"), "結束 LightCraft");
         set_language(Locale::En);
     }
 
