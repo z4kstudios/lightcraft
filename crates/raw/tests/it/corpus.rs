@@ -4,7 +4,8 @@
 //! Every file must be recognised, carry an embedded JPEG preview (optional for DNG, generic CFA TIFF,
 //! older Panasonic RAW and HEVC-preview CR3), and either decode to a valid image or report
 //! `Unsupported` for one of the variants we know we don't decode yet. Prints decode times
-//! (`cargo test -p lightcraft-raw --release --test corpus -- --nocapture`).
+//! (`cargo test -p lightcraft-raw --release --test it corpus:: -- --nocapture --skip _corpus::`; the
+//! `--skip` leaves out the other `*_corpus` modules).
 
 use lightcraft_raw::{RawError, RawFormat, decode, embedded_preview, probe, probe_info};
 use std::path::{Path, PathBuf};
@@ -946,7 +947,7 @@ fn corpus_samsung_srw() {
 #[test]
 fn corpus_fujifilm_compressed_samples() {
     use sha2::{Digest, Sha256};
-    let checksums = include_str!("../../../docs/raf-corpus.sha256");
+    let checksums = include_str!("../../../../docs/raf-corpus.sha256");
     let cases: &[(&str, usize, usize, u64, u64)] = &[
         ("raf-fuji-gfx100-3773.raf", 11808, 8754, 483668733090, 6453395759968151080),
         ("raf-fuji-gfx100-3775.raf", 11808, 8754, 120434414850, 6144091676930008551),
@@ -1200,7 +1201,7 @@ fn sony_pins_match_the_corpus_manifest() {
     lines.sort();
     let digest: String = Sha256::digest(lines.concat()).iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(digest, SONY_PINS_SHA256, "the pinned Sony SHA-256 table changed: check every changed pin against its file, then update the anchor");
-    let manifest = include_str!("../../../xtask/src/main.rs");
+    let manifest = include_str!("../../../../xtask/src/main.rs");
     for (name, sha) in SONY_SAMPLES {
         let entry = manifest.find(&format!("\"{name}\"")).unwrap_or_else(|| panic!("{name} is not in the manifest"));
         assert!(manifest[entry..].split_once("),").is_some_and(|(e, _)| e.contains(sha)), "{name}: pinned SHA-256 differs from the manifest");

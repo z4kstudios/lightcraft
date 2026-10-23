@@ -80,7 +80,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 ## Accessibility audit
 
-`crates/ui-egui/tests/accessibility.rs` walks the AccessKit tree egui hands to VoiceOver, Narrator and
+`crates/ui-egui/tests/it/accessibility.rs` walks the AccessKit tree egui hands to VoiceOver, Narrator and
 AT-SPI, headless, in Photo Grid, Square Grid, Detail, Compare, Survey and Reference, in each right
 panel (Edit, Profiles, Crop, Remove, Masking, Red Eye, Versions, Activity, Keywords, Info) and in 13
 dialogs (Export, Copy / Paste Settings, Create Preset, Rename, New Album, New Smart Album, Capture

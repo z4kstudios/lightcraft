@@ -2809,7 +2809,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A Sony ARW of `model`: a 64 × 48 uncompressed 14-bit CFA strip in a SubIFD (as `crates/raw/tests/vendor_robust.rs`
+    /// A Sony ARW of `model`: a 64 × 48 uncompressed 14-bit CFA strip in a SubIFD (as `crates/raw/tests/it/vendor_robust.rs`
     /// lays it out) whose IFD carries the full-frame 16–35 mm distortion table (tag 0x7037).
     fn sony_arw(model: &str) -> Vec<u8> {
         use lightcraft_tiff::tags::{self as t, photometric};
