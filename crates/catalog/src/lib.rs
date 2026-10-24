@@ -1193,4 +1193,6 @@ mod tests_repair;
 #[cfg(test)]
 mod tests_scale;
 #[cfg(test)]
+mod tests_tally;
+#[cfg(test)]
 mod tests_torn_append;
