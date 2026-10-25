@@ -137,7 +137,7 @@ file, on a background job (activity kind `focus`); `wait: true` returns the run'
 
 With several photos selected, the Info panel's Show Metadata For is `view.infoSelectedPhotos {on?}` (no `on`, or
 `on: null`, toggles; any other value that is not true or false is refused; replies `{on}`;
-`settings.infoSelectedPhotos`): off (Target Photo) shows the active photo's values, on (Selected Photos, the default)
+`settings.infoSelectedPhotos`): off (Target Photo) shows the active photo's values and saves edits to it alone, on (Selected Photos, the default)
 shows the values the selected photos share, leaves each text field and GPS where they differ empty with a Mixed hint,
 and shows Mixed as the Copyright Status when the statuses differ.
 

@@ -1283,7 +1283,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 panel(app, &ctx, RightPanel::Keywords, "Keywords");
             }
             app.ui.folded_sections.retain(|s| s != "keywording");
-            app.ui.focus_keywords = true;
+            app.ui.focus_keywords = Some(ctx.cumulative_pass_nr());
             Ok(Value::Null)
         }
         "panel.versions" => {

@@ -21,7 +21,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             // the Keyword List is the library's, not a photo's: it is there without a selection
             if app.ui.right == RightPanel::Keywords {
                 // (without a selection there is no Add keyword box for Add Keywords to put the cursor in)
-                app.ui.focus_keywords = false;
+                app.ui.focus_keywords = None;
                 egui::ScrollArea::vertical().id_salt("right-scroll").auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     if fold_header(app, ui, "keywording", "Keywords") {
@@ -736,6 +736,8 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     let for_selected = several && app.ui.settings.info_selected_photos;
     let m = shown_meta(&app.session.catalog, &p, &selected, for_selected);
     let mixed = if for_selected { mixed_meta(&app.session.catalog, &selected, &m) } else { Vec::new() };
+    // the photos an edit goes to: Target Photo edits the photo it shows
+    let targets = if several && !for_selected { vec![id] } else { selected.clone() };
     padded(ui, |ui| {
         if several {
             metadata_for(app, ui);
@@ -747,15 +749,15 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ("Extended Description", "extendedDescription", &m.extended_description, 3),
             ("Copyright", "copyright", &m.copyright, 1),
         ] {
-            meta_field(app, ui, label, key, value, lines, mixed.contains(&key));
+            meta_field(app, ui, label, key, value, lines, mixed.contains(&key), &targets);
         }
-        copyright_status(app, ui, m.copyright_status, mixed.contains(&"copyrightStatus"));
+        copyright_status(app, ui, m.copyright_status, mixed.contains(&"copyrightStatus"), &targets);
         for (label, key, value, lines) in [
             ("Rights Usage Terms", "usageTerms", &m.usage_terms, 2),
             ("Copyright Info URL", "copyrightUrl", &m.copyright_url, 1),
             ("Creator", "creator", &m.creator, 1),
         ] {
-            meta_field(app, ui, label, key, value, lines, mixed.contains(&key));
+            meta_field(app, ui, label, key, value, lines, mixed.contains(&key), &targets);
         }
         // file: name (rename), path (reveal), capture time (edit)
         let small = |ui: &mut egui::Ui, text: &str| ui.label(egui::RichText::new(crate::i18n::tr(text)).size(11.5).color(t.text_dim));
@@ -804,14 +806,14 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ("State / Province", "state", &m.state),
             ("Country", "country", &m.country),
         ] {
-            meta_field(app, ui, label, key, value, 1, mixed.contains(&key));
+            meta_field(app, ui, label, key, value, 1, mixed.contains(&key), &targets);
         }
         // GPS: typed as "lat, lon" (or degrees / minutes / seconds); empty clears it
         let gps_mixed = mixed.contains(&"gps");
         let gps = if gps_mixed { String::new() } else { m.gps.map(|(la, lo)| format!("{la:.6}, {lo:.6}")).unwrap_or_default() };
         let gid = egui::Id::new("info-gps");
         ui.label(egui::RichText::new("GPS").size(11.5).color(t.text_dim));
-        let mut edit: FieldEdit = ui.data(|d| d.get_temp(gid)).unwrap_or_else(|| FieldEdit::new(&gps, gps_mixed, &selected));
+        let mut edit: FieldEdit = ui.data(|d| d.get_temp(gid)).unwrap_or_else(|| FieldEdit::new(&gps, gps_mixed, &targets));
         let hint = crate::i18n::tr(if gps_mixed { MIXED } else { "latitude, longitude" });
         let r = crate::text_field::TextField::singleline("field:gps", &mut edit.text).hint(hint).label("GPS").width(f32::INFINITY).show(ui);
         edit.typed |= edit.text != edit.start;
@@ -969,13 +971,14 @@ const MIXED: &str = "Mixed";
 
 /// An Info panel field's edit under way, kept in egui memory between frames. A field saves when
 /// its text is not the text the edit started from, so a field left as it was saves nothing, even
-/// when what the panel shows changed during the edit. It saves to the photos selected when the
-/// edit started, also when the selection changed since.
+/// when what the panel shows changed during the edit. It saves to the photos it edited when the
+/// edit started (the selected photos, or Target Photo's photo alone), also when the selection
+/// changed since.
 #[derive(Clone)]
 struct FieldEdit {
     text: String,
     start: String,
-    /// The selected photos when the edit started (`photo.setMeta` `ids`).
+    /// The photos the field edited when the edit started (`photo.setMeta` `ids`).
     ids: Vec<u64>,
     /// The field said Mixed when the edit started.
     mixed: bool,
@@ -984,8 +987,8 @@ struct FieldEdit {
 }
 
 impl FieldEdit {
-    fn new(value: &str, mixed: bool, selected: &[PhotoId]) -> Self {
-        let ids = selected.iter().map(|id| id.0).collect();
+    fn new(value: &str, mixed: bool, targets: &[PhotoId]) -> Self {
+        let ids = targets.iter().map(|id| id.0).collect();
         FieldEdit { text: value.to_string(), start: value.to_string(), ids, mixed, typed: false }
     }
 
@@ -1085,8 +1088,9 @@ fn metadata_for(app: &mut LightcraftApp, ui: &mut egui::Ui) {
 }
 
 /// Copyright Status: Unknown / Copyrighted / Public Domain (`xmpRights:Marked`). `mixed`: the
-/// selected photos' statuses differ, and any status picked is given to all of them.
-fn copyright_status(app: &mut LightcraftApp, ui: &mut egui::Ui, current: lightcraft_catalog::CopyrightStatus, mixed: bool) {
+/// selected photos' statuses differ, and any status picked is given to all of them. A status
+/// picked goes to the photos `targets`.
+fn copyright_status(app: &mut LightcraftApp, ui: &mut egui::Ui, current: lightcraft_catalog::CopyrightStatus, mixed: bool, targets: &[PhotoId]) {
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(crate::i18n::tr("Copyright Status")).size(11.5).color(t.text_dim));
     let shown = crate::i18n::tr(if mixed { MIXED } else { current.label() });
@@ -1094,7 +1098,8 @@ fn copyright_status(app: &mut LightcraftApp, ui: &mut egui::Ui, current: lightcr
         for st in lightcraft_catalog::CopyrightStatus::ALL {
             let on = !mixed && st == current;
             if ui.selectable_label(on, crate::i18n::tr(st.label())).clicked() && !on {
-                let _ = app.run("photo.setMeta", json!({"copyrightStatus": st.id()}));
+                let ids: Vec<u64> = targets.iter().map(|id| id.0).collect();
+                let _ = app.run("photo.setMeta", json!({"ids": ids, "copyrightStatus": st.id()}));
             }
         }
     });
@@ -1105,13 +1110,14 @@ fn copyright_status(app: &mut LightcraftApp, ui: &mut egui::Ui, current: lightcr
 /// A labeled metadata text field: the typed text lives in egui memory while focused and is
 /// saved (photo.setMeta `key`) when the field loses focus. `mixed`: the selected photos' values
 /// differ, so the field starts empty and says so, and is saved only when it was typed in (left
-/// empty, it clears the field on every selected photo).
-fn meta_field(app: &mut LightcraftApp, ui: &mut egui::Ui, label: &str, key: &str, value: &str, lines: usize, mixed: bool) {
+/// empty, it clears the field on every selected photo). The edit is saved to the photos `targets`.
+#[allow(clippy::too_many_arguments)]
+fn meta_field(app: &mut LightcraftApp, ui: &mut egui::Ui, label: &str, key: &str, value: &str, lines: usize, mixed: bool, targets: &[PhotoId]) {
     let t = Tokens::get(ui.ctx());
     ui.label(egui::RichText::new(crate::i18n::tr(label)).size(11.5).color(t.text_dim));
     let id = egui::Id::new(("info-field", key));
     let value = if mixed { "" } else { value };
-    let mut edit: FieldEdit = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| FieldEdit::new(value, mixed, &app.session.selected()));
+    let mut edit: FieldEdit = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| FieldEdit::new(value, mixed, targets));
     let widget = format!("field:{key}");
     let field = if lines > 1 {
         crate::text_field::TextField::multiline(&widget, &mut edit.text).rows(lines)
@@ -1211,7 +1217,7 @@ fn keywording(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         let bid = egui::Id::new("kw-begin");
         let begin = ui.data_mut(|d| d.remove_temp::<u64>(bid)).is_some_and(|asked| asked.checked_add(1) == Some(pass));
         // Add Keywords (⌘K) asks for the cursor too, and for the box to be scrolled into sight
-        let asked = std::mem::take(&mut app.ui.focus_keywords);
+        let asked = app.ui.focus_keywords.take().is_some_and(|at| pass <= at.saturating_add(crate::state::FOCUS_KEYWORDS_PASSES));
         let r = crate::text_field::TextField::singleline("field:keyword", &mut text)
             .hint(crate::i18n::tr("Add keyword"))
             .width(f32::INFINITY)

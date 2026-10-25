@@ -3057,6 +3057,37 @@ mod tests {
         assert_eq!((caption(&h, 0), caption(&h, 1)), ("Harbor".into(), "Harbor".into()));
     }
 
+    /// Target Photo edits the photo it shows: with several photos selected, a field's edit is
+    /// saved to the active photo alone.
+    #[test]
+    fn info_target_photo_edits_only_the_photo_it_shows() {
+        let mut h = demo([1300.0, 1000.0]);
+        let t = Duration::from_secs(10);
+        let ask = |h: &mut Headless, method: &str, params: serde_json::Value| {
+            let r = h.request(method, params.clone(), t);
+            assert_eq!(r["ok"], true, "{method} {params}: {r}");
+            h.step();
+            h.step();
+        };
+        let exec = |h: &mut Headless, command: &str, params: serde_json::Value| {
+            ask(h, "engine.execute", json!({"command": command, "params": params}));
+        };
+        let ids: Vec<u64> = h.app.session.visible_cloned().iter().take(2).map(|p| p.0).collect();
+        let caption = |h: &Headless, i: usize| h.app.session.catalog.photo(lightcraft_catalog::PhotoId(ids[i])).unwrap().meta.caption.clone();
+        exec(&mut h, "photo.setMeta", json!({"ids": [ids[0]], "caption": "Dawn"}));
+        exec(&mut h, "photo.setMeta", json!({"ids": [ids[1]], "caption": "Dusk"}));
+        h.request("ui.set", json!({"view": "detail", "right": "info"}), t);
+        exec(&mut h, "library.select", json!({"ids": ids, "active": ids[0]}));
+        exec(&mut h, "view.infoSelectedPhotos", json!({"on": false}));
+        h.settle(SETTLE);
+        ask(&mut h, "ui.clickWidget", json!({"id": "field:caption"}));
+        ask(&mut h, "ui.key", json!({"key": "End"}));
+        ask(&mut h, "ui.text", json!({"text": "!"}));
+        ask(&mut h, "ui.key", json!({"key": "Tab"}));
+        h.settle(SETTLE);
+        assert_eq!((caption(&h, 0), caption(&h, 1)), ("Dawn!".into(), "Dusk".into()));
+    }
+
     /// The fields the Info panel marks as mixed: each text field, the copyright status and GPS
     /// where a selected photo differs from the photo the panel shows, and none for one photo.
     #[test]

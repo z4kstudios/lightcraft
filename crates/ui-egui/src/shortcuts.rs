@@ -74,7 +74,7 @@ fn assigned_elsewhere(keymap: &Keymap, id: &str, sc: &str) -> bool {
 
 /// The keys the keymap gives to known commands, with each command's id. Entries for commands this
 /// build doesn't know and entries that don't parse are ignored.
-fn saved_keys(keymap: &Keymap) -> impl Iterator<Item = (&str, (Modifiers, Key))> {
+pub(crate) fn saved_keys(keymap: &Keymap) -> impl Iterator<Item = (&str, (Modifiers, Key))> {
     keymap.iter().filter(|(id, _)| find_bindable(id).is_some()).filter_map(|(id, sc)| Some((id.as_str(), parse(sc)?)))
 }
 
