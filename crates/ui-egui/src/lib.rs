@@ -50,6 +50,7 @@ pub mod tasks;
 pub mod text_field;
 pub mod theme;
 pub mod titlebar;
+pub mod updates_ui;
 pub mod widgets;
 pub mod window_place;
 
@@ -409,6 +410,7 @@ pub struct LightcraftApp {
     pub headless_host: bool,
     /// Warnings to show one at a time (damaged settings files…, issue #103).
     pub notices: Vec<String>,
+    pub(crate) updates_rt: updates_ui::Runtime,
     /// Quitting was stopped to ask first: changes couldn't be saved, or tasks are running.
     pub quit_prompt: Option<QuitPrompt>,
     /// Keyboard/focus/input state for the prompt above, including its one-frame creation barrier.
@@ -615,6 +617,7 @@ impl LightcraftApp {
             text_focus: false,
             headless_host: false,
             notices: vec![],
+            updates_rt: Default::default(),
             quit_prompt: None,
             notice_input: Default::default(),
             quit_confirmed: false,
@@ -1966,6 +1969,7 @@ impl LightcraftApp {
         lightroom_import::tick(self, ctx);
         recheck::tick(self);
         tasks::poll(self, ctx);
+        updates_ui::tick(self, ctx);
         self.preview_build_status(ctx);
         self.save_status(ctx);
         self.ai_mask_detail(ctx, now);
@@ -2123,7 +2127,7 @@ impl LightcraftApp {
         // Recent-library checks and launch-list keys read focus/time/keys: they belong to the UI
         // phase, not the hidden-capable `logic` tick (plan §4.5 / migration input contract).
         panels::library_problem::logic(self, ctx);
-        if self.fonts_ready {
+        if self.fonts_ready && !updates_ui::blocks_input(self) {
             shortcuts::handle(self, ctx);
         }
     }
@@ -2626,6 +2630,7 @@ impl LightcraftApp {
                 panels::notices::hide_background_pointer(&ctx);
             }
             panels::dialogs::show(self, &ctx, notice_blocks);
+            updates_ui::show(self, &ctx);
             panels::library_problem::show(self, &ctx, notice_blocks);
             panels::toast(self, &ctx);
             drop_overlay::show(self, &ctx);
@@ -2656,6 +2661,7 @@ impl LightcraftApp {
             panels::notices::hide_background_pointer(&ctx);
         }
         panels::dialogs::show(self, &ctx, notice_blocks);
+        updates_ui::show(self, &ctx);
         panels::library_problem::show(self, &ctx, notice_blocks);
         export_task::poll(self, &ctx);
         slideshow_export::poll(self, &ctx);
