@@ -3562,13 +3562,13 @@ dependencies = [
 
 [[package]]
 name = "lightcraft-ai-inpaint"
-version = "0.9.1"
+version = "0.14.0"
 dependencies = [
  "candle-core",
  "lightcraft-fetch",
  "log",
  "thiserror 2.0.21",
- "zip",
+ "zip 7.2.0",
 ]
 
 [[package]]
