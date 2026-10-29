@@ -9,8 +9,8 @@ use crate::icons::{Icon, paint};
 use crate::theme::Tokens;
 
 /// Standard dropdown chevrons, including settings, import/export and rule editors.
-pub fn combo_box(id: impl egui::AsIdSalt) -> egui::ComboBox<'static> {
-    egui::ComboBox::from_id_salt(id)
+pub fn combo_box(id: impl egui::AsIdSalt) -> craft_ui::ComboBox<'static> {
+    craft_ui::ComboBox::from_id_salt(id)
         .icon(|ui, rect, visuals, _| {
             paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), Icon::ChevronDown, visuals.fg_stroke.color);
         })
@@ -1111,9 +1111,15 @@ pub(crate) fn elide_head(text: &str, max: f32, width: impl Fn(&str) -> f32) -> S
     "…".to_string()
 }
 
+pub mod album_picker;
+pub mod button;
+pub mod date_picker;
 #[cfg(test)]
 #[path = "widgets/tests_numeric_entry.rs"]
 mod numeric_entry_tests;
+pub mod progress;
+pub mod rating;
+pub mod text_field;
 
 #[cfg(test)]
 #[path = "widgets/tests_slider_reset.rs"]
