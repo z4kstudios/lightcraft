@@ -392,7 +392,7 @@ CRAFT_FONTS_DIR=../craft-fonts cargo run --release -p lightcraft
 ```
 
 不指定它时，LightCraft 构建和运行的方式完全相同，只是中文和日文文字没有字形。字体从不提交到
-本仓库；见 [craftrules `standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md)。
+本仓库。
 
 **界面语言：** **编辑 → 语言**（English、简体中文、繁體中文（台灣）、日本語、Português (Brasil)、Español、Deutsch、Русский、Français）或 **设置 → 一般 →
 语言**；选择立即生效并会保留。见 [docs/localization.md](docs/localization.md)。

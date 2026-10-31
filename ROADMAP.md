@@ -150,10 +150,9 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 - 2026-10-10 (RAW): RAW measured model by model against Adobe's 1,446-model list (234 verified, 943
   unverified, 233 preview-only, 36 unsupported; ~84% of photographers' cameras decode, ~40% on a
   verified body). Full ~61%, mainstream ~49%, essentials ~64%; beta ~14 points away.
-- 2026-10-10 (final): full ready is a weighted sum over the dimensions (~59%; method aligned with
-  the standard); mainstream practitioner ~51% (450–840 h), essentials user ~63% (160–300 h);
+- 2026-10-10 (final): full ready is a weighted sum over the dimensions (~59%; no new evidence); mainstream practitioner ~51% (450–840 h), essentials user ~63% (160–300 h);
   alpha gate passes.
-- 2026-10-10: full re-measure for the progress-docs standard: stage alpha, ready ~55%, checklist
+- 2026-10-10: full re-measure, progress docs restructured: stage alpha, ready ~55%, checklist
   81.1%; new docs (target-app-parity, gaps, roadmap, architecture, raw / file-format / hardware / UI
   / localization parity); `docs/parity.md` renamed `docs/parity-checklist.md`. Landed today: Nikon
   lossy-after-split NEF (#633), ORF 12.8 bpp (#651), HDR gain map JPEG / PQ AVIF / float TIFF export
@@ -213,10 +212,10 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 | 2026-10-12 | minor | 117 Nikon and Fujifilm bodies verified (354 models, 24%); headline numbers unchanged |
 | 2026-10-11 | minor | EOS R5 Mark II CR3 verified: CR3 on four verified bodies, RAW decoding 76% → 77%; headline numbers unchanged |
 | 2026-10-10 | minor | RAW measured model by model; RAW decode and colour as explicit rows: full 59% → 61%, mainstream 51% → 49%, essentials 63% → 64%; beta ~14 points |
-| 2026-10-10 | minor | Full ready restored to the additive weighted sum (~59%; method aligned with the standard, no new evidence); hours per audience; beta ~16 points away |
+| 2026-10-10 | minor | Full ready restored to the additive weighted sum (~59%; no new evidence); hours per audience; beta ~16 points away |
 | 2026-10-10 | minor | Mainstream practitioner and essentials user numbers; full ready 55% → 46% (method written down); beta 340–600 h |
 | 2026-10-10 | minor | Alpha gate added (core-workflow check): passes, stays alpha |
-| 2026-10-10 | major | Restructured to the progress-docs standard; re-measured; *Where we stand*, *Parity estimate* and *Totals* moved to docs/target-app-parity.md, milestones and risks to docs/roadmap.md, raw coverage to docs/raw-parity.md, catalog migration to docs/file-format-parity.md, CJK notes to docs/localization-parity.md |
+| 2026-10-10 | major | Progress docs restructured; re-measured; *Where we stand*, *Parity estimate* and *Totals* moved to docs/target-app-parity.md, milestones and risks to docs/roadmap.md, raw coverage to docs/raw-parity.md, catalog migration to docs/file-format-parity.md, CJK notes to docs/localization-parity.md |
 | 2026-10-08 | minor | *Where we stand* by dimension and by kind of user |
 | 2026-10-02 | major | Parity estimate and effort table |
 | 2026-09-30 | major | Created |

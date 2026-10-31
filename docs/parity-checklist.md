@@ -932,7 +932,7 @@ Latin stays upright. Advanced Japanese composition remains open. Regression cove
 | 2026-10-11 | minor | LR-IMP-FORMATS and LR-IMP-CAMERA-COVERAGE: EOS R5 Mark II CR3 decodes from sensor data (57% of its C-RAW files opened as a preview: QP-map escape); status unchanged (🟡) |
 | 2026-10-10 | minor | LR-VIEW-PHOTOGRID: retain queued stand-in identity while updating visible/prefetch priority; status unchanged. |
 | 2026-10-10 | patch | LR-BEHAV-UNDO: file/XMP repair retries and merged rename Undo/Redo evidence; status and summary counts unchanged. |
-| 2026-10-10 | minor | Renamed from `parity.md` (progress-docs standard); Top gaps moved to gaps.md (its duplicated items 1–2 from a bad merge resolved there), shortcut notes moved to ui-parity.md. Rows unchanged; a recount of the rows gives 81.1% of 517 in-scope rows (P0 98.0%, P1 95.1%, P2 46.9%), so the generated summary above is due a `cargo xtask parity --write` |
+| 2026-10-10 | minor | Renamed from `parity.md` (progress docs); Top gaps moved to gaps.md (its duplicated items 1–2 from a bad merge resolved there), shortcut notes moved to ui-parity.md. Rows unchanged; a recount of the rows gives 81.1% of 517 in-scope rows (P0 98.0%, P1 95.1%, P2 46.9%), so the generated summary above is due a `cargo xtask parity --write` |
 | 2026-10-14 | minor | LR-IMP-CAMERA-COVERAGE: 97 Canon CR2, Pentax and Ricoh Adobe models verified on one CC0 file each; status unchanged (🟡) |
 | 2026-10-13 | minor | LR-LIB-SMARTALBUM: `cmd:library.holdView` and `cmd:library.refresh`: a view can hold the photos it shows until it is refreshed; status unchanged (✅) |
 | 2026-09-30 – 2026-10-11 | — | Rows added and updated with each feature (see `git log -- docs/parity.md docs/parity-checklist.md`) |

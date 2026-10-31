@@ -110,7 +110,7 @@ pure-Rust inference is proven (faces, SAM 3, denoise).
 
 ## Ready for real work, mainstream practitioner and essentials user
 
-Three readiness numbers (craftrules `standards/progress-docs.md`). The full number is a weighted
+Three readiness numbers. The full number is a weighted
 sum over the dimensions with written weights. Mainstream and essentials take the weighted depth of
 the areas their user touches, then apply written multiplicative discounts for what still stops real
 work. Each has its own hours to ~95%, calibrated as in [How hours are calibrated](#how-hours-are-calibrated)
@@ -222,9 +222,9 @@ basic sliders, crop, apply a preset, undo, export JPEGs.
 ### Why the full number moved (55% → 46% → 59%)
 
 The first figure (~55%) was the feature depth "pulled down" by an unwritten judgement. A later pass
-applied the mainstream discounts to it (~46%). The standard defines the full number as a weighted
-sum over the dimensions, so it is now that sum with the weights written above: ~59%. Method aligned
-with the standard, no new evidence. The stage stays **alpha**.
+applied the mainstream discounts to it (~46%). The full number is a weighted
+sum over the dimensions, so it is now that sum with the weights written above: ~59%. No new
+evidence. The stage stays **alpha**.
 
 ## Stage
 
@@ -268,7 +268,7 @@ verification. Calibrated on this repository's history (git log and GitHub PR ope
 The previous estimate (2026-10-02, kept below) was ≈ 270–505 h to full parity. It counted checklist
 rows only. New evidence since: the target's own lists (≈ 1,000 dedicated camera models, 3,635 lens
 profiles, 37 AI models, 16 languages) measured from the installed bundle; per-maker verification
-counts; that CI tests only FreeBSD; and the standard's added dimensions (localization, stability,
+counts; that CI tests only FreeBSD; and the added dimensions (localization, stability,
 platforms, ecosystem). The raw-codec package it estimated at 40–80 h took roughly that and closed
 most of its list; what remains is the data-heavy part (colour, lenses, models) it did not count.
 
@@ -278,7 +278,7 @@ most of its list; what remains is the data-heavy part (colour, lenses, models) i
 |---|---|---|---|---|
 | 2026-10-12 | 81.1% (unchanged) | ~61% full · ~51% mainstream · ~65% essentials | unchanged | 22 more CR3 bodies verified (raw-parity.md) |
 | 2026-10-10 (RAW) | 81.1% (unchanged) | ~61% full · ~49% mainstream · ~64% essentials | unchanged | RAW measured model by model against Adobe's list; RAW decode and colour as explicit rows |
-| 2026-10-10 (final) | 81.1% (unchanged) | ~59% full (weighted sum) · ~51% mainstream · ~63% essentials | full 1,000–1,800 h · mainstream 450–840 h · essentials 160–300 h | method aligned with the standard |
+| 2026-10-10 (final) | 81.1% (unchanged) | ~59% full (weighted sum) · ~51% mainstream · ~63% essentials | full 1,000–1,800 h · mainstream 450–840 h · essentials 160–300 h | no new evidence |
 | 2026-10-10 (later) | 81.1% (unchanged) | ~46% full · ~51% mainstream · ~63% essentials | 1,000–1,800 h | full × discounts (superseded) |
 | 2026-10-10 | 81.1% / 98.0% / 95.1% / 46.9% (517 rows) | ~55% | 1,000–1,800 h | this re-measure |
 | 2026-10-08 | 79.7% / 98.2% / 95.6% / 41.6% (509 rows) | 60–70% | — | ROADMAP *Where we stand* |
@@ -314,8 +314,8 @@ P2 items 12–25 h; look tuning, performance, packaging, hardening 25–45 h.
 | 2026-10-12 | minor | 117 Nikon and Fujifilm bodies verified (raw-parity.md): use-weighted share whose camera decodes 85% → 86%, RAW decoding 77% (unchanged); mainstream depth 72.1% → 72.4%, essentials depth 77.5% → 77.6%; headline numbers unchanged |
 | 2026-10-11 | minor | EOS R5 Mark II CR3 verified (raw-parity.md): use-weighted share whose camera decodes 84% → 85%, RAW decoding 76% → 77%; full 60.6% → 60.7%, mainstream depth 71.8% → 72.1%, essentials depth 77.4% → 77.5%; the rounded numbers (~61%, ~49%, ~64%) are unchanged |
 | 2026-10-10 | minor | RAW measured model by model (raw-parity.md): RAW decoding (76%) and colour (35%) are explicit rows of the full sum (59% → 61%); mainstream uses the use-weighted 84% plus a ×0.85 colour discount (51% → 49%); essentials uses 84% × colour 0.75 (63% → 64%); beta ~14 points |
-| 2026-10-10 | minor | Full number restored to an additive weighted sum over the dimensions (~59%; method aligned with the standard, no new evidence); hours to ~95% for each of the three audiences; beta distance ~16 points |
+| 2026-10-10 | minor | Full number restored to an additive weighted sum over the dimensions (~59%; no new evidence); hours to ~95% for each of the three audiences; beta distance ~16 points |
 | 2026-10-10 | minor | Added mainstream practitioner (~51%) and essentials user (~63%) numbers; full ready re-derived from written weights × discounts (55% → 46%); user-issue evidence; beta hours 340–600 |
 | 2026-10-10 | minor | Stage re-checked against the core-workflow alpha gate: passes, stays alpha |
-| 2026-10-10 | major | Created per the progress-docs standard: full re-measure (checklist recount, installed Lightroom 9.6 bundle listing, code counts, catalogs, CI), feature areas with weights, dimensions, AI, stage, calibration; merged ROADMAP's *Where we stand* and *Parity estimate* |
+| 2026-10-10 | major | Created as progress docs: full re-measure (checklist recount, installed Lightroom 9.6 bundle listing, code counts, catalogs, CI), feature areas with weights, dimensions, AI, stage, calibration; merged ROADMAP's *Where we stand* and *Parity estimate* |
 | 2026-10-14 | minor | RAW: 82% of Adobe's models decode, 36% verified (integration batch 36) |
