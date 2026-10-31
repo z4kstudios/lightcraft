@@ -72,5 +72,13 @@ sync_github_name = true
 real_name = "Robert Lee"
 sync_github_name = true
 
+[people.samuelili]
+real_name = "Samuel Li"
+sync_github_name = true
+
 [people.dylanmtaylor]
 sync_github_name = true
+
+[people.Peaperfish]
+real_name = "Yule Wang"
+display_name = "Brian Wang"
