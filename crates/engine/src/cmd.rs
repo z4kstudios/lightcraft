@@ -42,6 +42,7 @@ mod print;
 mod query;
 pub mod recheck;
 pub mod reload;
+pub mod similar;
 mod slideshow;
 mod sync;
 mod xmp;
