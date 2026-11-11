@@ -367,7 +367,9 @@ fn main() -> eframe::Result {
                 // HDR display: SDR unless the surface, platform and display all allow HDR
                 hdr_display::report(cc.wgpu_render_state.as_ref().map(|r| r.target_format));
                 let mut app = LightcraftApp::new(session, services(cc, app_log_file.as_deref()));
-                app.set_startup_update_check(true);
+                // Z4K: no update check at start; it would replace this build (upstream main, lower version
+                // number than the latest release) with the plain release. Update-My-LightCraft keeps it current.
+                app.set_startup_update_check(false);
                 if let Some(ui) = prefs {
                     app.ui = ui;
                 }
